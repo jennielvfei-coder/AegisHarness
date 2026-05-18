@@ -22,7 +22,7 @@ class ObservationReport:
     confidence: float  # 0.0–1.0
     reason: str  # Human-readable: why this action was chosen
     summary: str  # One-paragraph summary of what was learned
-    tags: list = field(default_factory=list)  # e.g. ['contract-review', 'privacy']
+    tags: list[str] = field(default_factory=list)  # e.g. ['contract-review', 'privacy']
     skill_name: Optional[str] = None  # For patch_skill: which skill to update
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
