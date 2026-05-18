@@ -131,18 +131,7 @@ def analyze_session(
     msg_count = session_data["message_count"]
     tool_count = _count_tool_calls(content)
 
-    # Rule 1: Skip trivial sessions
-    if obs_config["skip_trivial_sessions"] and tool_count < obs_config["min_tool_calls_for_skill"]:
-        return ObservationReport(
-            session_id=f"session_{datetime.now().strftime('%Y%m%d%H%M%S')}",
-            action="skip",
-            confidence=0.9,
-            reason=f"Trivial session: only {tool_count} tool calls (threshold: {obs_config['min_tool_calls_for_skill']})",
-            summary="",
-            tags=[],
-        )
-
-    # Rule 2: Check for correction pattern → patch_skill
+    # Rule 1: Correction pattern → patch_skill (highest priority, always check)
     if _detect_pattern(content, obs_config["patterns"]["correction"]):
         return ObservationReport(
             session_id=f"session_{datetime.now().strftime('%Y%m%d%H%M%S')}",
@@ -153,7 +142,7 @@ def analyze_session(
             tags=_guess_tags(content),
         )
 
-    # Rule 3: Check for preference statement → update_preference
+    # Rule 2: Preference statement → update_preference (always check)
     if _detect_pattern(content, obs_config["patterns"]["preference"]):
         return ObservationReport(
             session_id=f"session_{datetime.now().strftime('%Y%m%d%H%M%S')}",
@@ -164,7 +153,7 @@ def analyze_session(
             tags=_guess_tags(content),
         )
 
-    # Rule 4: Complex session (many tool calls) → create_skill candidate
+    # Rule 3: Complex session with many tool calls → create_skill candidate
     threshold = obs_config["min_tool_calls_for_skill"]
     if tool_count >= threshold:
         return ObservationReport(

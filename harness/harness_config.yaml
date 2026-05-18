@@ -1,11 +1,11 @@
 harness:
-  transcript_dir: "C:\\Users\\Chucky\\.claude\\projects\\D--Claude"
+  transcript_dir: "D:\\Claude"
   transcript_file: "memory.jsonl"
   db_path: "D:\\Claude\\harness\\state.db"
 
 observer:
-  min_tool_calls_for_skill: 5
-  skip_trivial_sessions: true
+  min_tool_calls_for_skill: 3
+  skip_trivial_sessions: false
   patterns:
     correction:
       - "不对"
