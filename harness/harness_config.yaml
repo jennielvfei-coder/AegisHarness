@@ -1,0 +1,41 @@
+harness:
+  transcript_dir: "C:\\Users\\Chucky\\.claude\\projects\\D--Claude"
+  transcript_file: "memory.jsonl"
+  db_path: "D:\\Claude\\harness\\state.db"
+
+observer:
+  min_tool_calls_for_skill: 5
+  skip_trivial_sessions: true
+  patterns:
+    correction:
+      - "不对"
+      - "不是这样"
+      - "应该是"
+      - "错了"
+      - "改一下"
+      - "纠正"
+    preference:
+      - "以后都"
+      - "我总是"
+      - "帮我记住"
+      - "我习惯"
+      - "我的偏好"
+    new_workflow:
+      - "怎么做"
+      - "帮我想想"
+      - "分析一下"
+      - "审查"
+      - "起草"
+
+refiner:
+  enabled: false
+  model: "deepseek-v4-pro"
+
+injector:
+  enabled: false
+  max_fragments: 3
+  min_confidence: 0.6
+
+evolution:
+  auto_activate: false
+  require_review: true
