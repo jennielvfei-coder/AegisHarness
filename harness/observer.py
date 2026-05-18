@@ -28,8 +28,25 @@ class ObservationReport:
 
 
 def load_config(config_path: Path) -> dict:
-    with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    """Load harness configuration from a YAML file.
+
+    Args:
+        config_path: Path to the YAML configuration file.
+
+    Returns:
+        Parsed configuration dictionary.
+
+    Raises:
+        FileNotFoundError: If the config file does not exist.
+        yaml.YAMLError: If the config file contains invalid YAML.
+    """
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    except yaml.YAMLError as e:
+        raise yaml.YAMLError(f"Invalid YAML in config file {config_path}: {e}")
 
 
 def _read_last_session(transcript_path: Path) -> Optional[dict]:
@@ -53,9 +70,8 @@ def _read_last_session(transcript_path: Path) -> Optional[dict]:
     if not lines:
         return None
 
-    last = lines[-1]
     return {
-        "content": json.dumps(last, ensure_ascii=False),
+        "content": json.dumps(lines, ensure_ascii=False),
         "message_count": len(lines),
     }
 
@@ -66,18 +82,8 @@ def _count_tool_calls(content: str) -> int:
     return len(re.findall(pattern, content))
 
 
-def _detect_correction(content: str, patterns: list) -> bool:
-    """Check if user corrected the assistant in this session."""
-    user_sections = re.findall(r'"role"\s*:\s*"user"[^}]*"content"\s*:\s*"([^"]*)"', content)
-    for section in user_sections:
-        for phrase in patterns:
-            if phrase in section:
-                return True
-    return False
-
-
-def _detect_preference(content: str, patterns: list) -> bool:
-    """Check if user stated a durable preference."""
+def _detect_pattern(content: str, patterns: list[str]) -> bool:
+    """Check if any pattern appears in user message sections of the transcript."""
     user_sections = re.findall(r'"role"\s*:\s*"user"[^}]*"content"\s*:\s*"([^"]*)"', content)
     for section in user_sections:
         for phrase in patterns:
@@ -137,7 +143,7 @@ def analyze_session(
         )
 
     # Rule 2: Check for correction pattern → patch_skill
-    if _detect_correction(content, obs_config["patterns"]["correction"]):
+    if _detect_pattern(content, obs_config["patterns"]["correction"]):
         return ObservationReport(
             session_id=f"session_{datetime.now().strftime('%Y%m%d%H%M%S')}",
             action="patch_skill",
@@ -148,7 +154,7 @@ def analyze_session(
         )
 
     # Rule 3: Check for preference statement → update_preference
-    if _detect_preference(content, obs_config["patterns"]["preference"]):
+    if _detect_pattern(content, obs_config["patterns"]["preference"]):
         return ObservationReport(
             session_id=f"session_{datetime.now().strftime('%Y%m%d%H%M%S')}",
             action="update_preference",
@@ -181,7 +187,7 @@ def analyze_session(
     )
 
 
-def _guess_tags(content: str) -> list:
+def _guess_tags(content: str) -> list[str]:
     """Heuristic tag guessing — replaced by LLM in Phase 2."""
     tags = []
     keywords = {
@@ -202,6 +208,11 @@ def _guess_tags(content: str) -> list:
         "劳动": "employment",
         "知识产权": "ip",
         "商标": "ip",
+        "m&a": "m-a",
+        "due diligence": "m-a",
+        "intellectual property": "ip",
+        "employment": "employment",
+        "data": "data-compliance",
     }
     content_lower = content.lower()
     for key, tag in keywords.items():
