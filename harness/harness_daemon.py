@@ -10,24 +10,41 @@ import argparse
 import sys
 from pathlib import Path
 
+import yaml
+
 HARNESS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(HARNESS_DIR))
 
 
+def load_config(config_path):
+    """Load the harness YAML configuration file."""
+    with open(config_path, 'r', encoding='utf-8') as f:
+        return yaml.safe_load(f)
+
+
 def cmd_observe():
     """Phase 1: Analyze the latest session transcript and record observations."""
-    from observer import analyze_session
-    from indexer import HarnessDB
-
     config_path = HARNESS_DIR / "harness_config.yaml"
-    transcript_path = HARNESS_DIR.parent / "memory.jsonl"
+    config = load_config(config_path)
+
+    # Resolve transcript path from YAML config (not hardcoded)
+    transcript_dir = Path(config["harness"]["transcript_dir"])
+    transcript_file = config["harness"]["transcript_file"]
+    transcript_path = transcript_dir / transcript_file
+
+    # Resolve db path from YAML config (not hardcoded)
+    db_path = Path(config["harness"]["db_path"])
+
+    # Lazy imports — deferred because modules may not exist yet in Phase 1
+    from observer import analyze_session  # deferred: Phase 1 observer module may not exist yet
+    from indexer import HarnessDB         # deferred: Phase 1 indexer module may not exist yet
 
     report = analyze_session(transcript_path, config_path)
     if report is None:
         print("[harness] No transcript found or nothing to analyze.")
         return
 
-    db = HarnessDB(HARNESS_DIR / "state.db")
+    db = HarnessDB(db_path)
     db.save_observation(report)
     print(f"[harness] Observation saved: action={report.action}, "
           f"confidence={report.confidence:.2f}")
@@ -35,6 +52,13 @@ def cmd_observe():
 
 def cmd_inject():
     """Phase 3: Search for relevant fragments and output injection text."""
+    # Read config following the same pattern as cmd_observe
+    config_path = HARNESS_DIR / "harness_config.yaml"
+    config = load_config(config_path)
+
+    # Resolve db path from YAML config (consistent with cmd_observe)
+    db_path = Path(config["harness"]["db_path"])
+
     print("[harness] injector not yet implemented (Phase 3).")
 
 
@@ -43,10 +67,14 @@ def main():
     parser.add_argument("command", choices=["observe", "inject"])
     args = parser.parse_args()
 
-    if args.command == "observe":
-        cmd_observe()
-    elif args.command == "inject":
-        cmd_inject()
+    try:
+        if args.command == "observe":
+            cmd_observe()
+        elif args.command == "inject":
+            cmd_inject()
+    except Exception as e:
+        print(f"[harness] Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
