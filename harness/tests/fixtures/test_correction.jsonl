@@ -1,0 +1,6 @@
+{"role": "user", "content": "审查这份合同"}
+{"type": "tool_use", "name": "Read"}
+{"type": "tool_use", "name": "Grep"}
+{"type": "tool_use", "name": "Edit"}
+{"type": "tool_use", "name": "Write"}
+{"role": "user", "content": "不对，责任上限应该用1倍不是2倍"}

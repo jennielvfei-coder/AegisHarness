@@ -1,0 +1,4 @@
+{"role": "user", "content": "帮我看看这份DPA"}
+{"type": "tool_use", "name": "Read"}
+{"type": "tool_use", "name": "Grep"}
+{"role": "user", "content": "以后都按中国法来，管辖地选浙江法院"}

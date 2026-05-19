@@ -232,7 +232,7 @@ def _detect_preference_semantic(content: str) -> bool:
     )
     for section in user_sections:
         for word in _PREFERENCE_INTENT_WORDS:
-            if word in section and len(section) > 20:
+            if word in section and len(section) > 8:
                 return True
     return False
 
@@ -344,7 +344,8 @@ def analyze_session(
     is_complex = tool_count >= threshold or len(content) >= content_threshold
     has_failure_or_interruption = failure_count > 0 or has_interruption
 
-    if not has_failure_or_interruption and len(tags) <= 2 and tool_count < threshold:
+    if (tool_count >= 1 and not has_failure_or_interruption
+            and len(tags) <= 2 and tool_count < threshold):
         # Simple session with no learning signal → save as fragment only
         conf = _compute_confidence(tool_count, msg_count, failure_count, tool_diversity, False)
         return ObservationReport(
