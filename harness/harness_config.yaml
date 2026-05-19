@@ -5,11 +5,8 @@ harness:
   db_path: "D:\\Claude\\harness\\state.db"
 
 observer:
-  # Only trigger refiner (LLM call) for genuinely complex sessions.
-  # Correction/preference patterns are always checked regardless of thresholds.
-  min_tool_calls_for_skill: 5
-  min_content_length_for_skill: 3000
-  skip_trivial_sessions: true
+  min_tool_calls_for_skill: 3
+  min_content_length_for_skill: 1200
   patterns:
     correction:
       - "不对"
@@ -18,18 +15,17 @@ observer:
       - "错了"
       - "改一下"
       - "纠正"
+      - "那个不对"
+      - "你忘了我之前说过的"
     preference:
       - "以后都"
       - "我总是"
       - "帮我记住"
       - "我习惯"
       - "我的偏好"
-    new_workflow:
-      - "怎么做"
-      - "帮我想想"
-      - "分析一下"
-      - "审查"
-      - "起草"
+      - "记住"
+      - "默认"
+      - "下次"
 
 refiner:
   enabled: true
@@ -39,6 +35,11 @@ injector:
   enabled: true
   max_fragments: 3
   min_confidence: 0.6
+
+vector_db:
+  enabled: false
+  backend: "chroma"
+  model: "all-MiniLM-L6-v2"
 
 mcp_wrapper:
   enabled: true

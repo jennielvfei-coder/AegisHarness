@@ -43,32 +43,50 @@ The user corrected the assistant during this session. Here's the session context
 The correction was about: {observation.get('summary', '')}
 Tags: {observation.get('tags', [])}
 
-FIRST classify the skill (REQUIRED):
+FIRST classify (REQUIRED):
 SKILL_TYPE: <env-fix | task-workflow | mental-model>
 QUALITY_SCORE: <0.0-1.0, 0.8+=concrete-repeatable>
+ACTION: <create | merge | discard>
 
-Generate an updated SKILL.md file:
+{observation.get('existing_skills_text', '')}
+
+Generate the skill:
 
 ```markdown
 ---
-name: <skill-name>
+name: <kebab-case>
 description: <one-line>
 tags: [{', '.join(observation.get('tags', ['general']))}]
-version: <bump-from-previous>
-auto_generated: true
+triggers:
+  - <when-to-suggest-this-skill>
+version: <bump-previous+1>
 harness_confidence: {observation.get('confidence', 0.7)}
 ---
 
 # <Skill Name>
 
-## When to Use
+## 执行逻辑
+
+### When to Use
 ...
 
-## Updated Guidance (from session {observation.get('session_id', '')})
+### Step-by-Step
+1. ...
+2. ...
+
+### How to Verify
+- ...
+
+## 异常处理
+
+### Edge Cases
+- ...
+
+### Fallback
+- ...
+
+## Updated Guidance
 {observation.get('reason', '')}
-
-## How To
-...
 ```
 
 Focus on the CORRECTION — what changed and why. Keep it concise (under 1500 tokens).
@@ -81,35 +99,53 @@ Tags: {observation.get('tags', [])}
 Context from the session:
 {_truncate(session_content, 3000)}
 
-FIRST classify the skill (REQUIRED):
+FIRST classify (REQUIRED):
 SKILL_TYPE: <env-fix | task-workflow | mental-model>
 QUALITY_SCORE: <0.0-1.0, 0.8+=concrete-repeatable>
+ACTION: <create | merge | discard>
 
-Generate a new SKILL.md file:
+{observation.get('existing_skills_text', '')}
+
+Generate the skill:
 
 ```markdown
 ---
-name: <kebab-case-skill-name>
+name: <kebab-case>
 description: <one-line-summary>
 tags: [{', '.join(observation.get('tags', ['general']))}]
+triggers:
+  - <when-to-suggest-this-skill>
 version: 1
-auto_generated: true
 harness_confidence: {observation.get('confidence', 0.7)}
 ---
 
 # <Skill Name>
 
-## When to Use
+## 执行逻辑
+
+### When to Use
 ...
 
-## How To
-...
+### Step-by-Step
+1. ...
+2. ...
+
+### How to Verify
+- ...
+
+## 异常处理
+
+### Edge Cases
+- ...
+
+### Fallback
+- ...
 
 ## Evolution Log
 - {datetime.now().strftime('%Y-%m-%d')} v1: Auto-created from session {observation.get('session_id', '')}
 ```
 
-Focus on the reusable workflow — what pattern did the assistant discover that can be reused?
+Focus on the reusable workflow — what pattern can be abstracted beyond this specific task.
 """,
         "update_preference": f"""Extract the user's stated preference from this session context.
 
@@ -221,6 +257,12 @@ def refine(
         "skill_name": observation_report.skill_name,
     }
 
+    # ── P₄: FTS5 similarity check ──
+    similar = _search_similar_skills(observation_report.tags)
+    obs["existing_skills_text"] = _existing_skills_text(similar) if similar else ""
+    if similar:
+        print(f"[refiner] Found {len(similar)} similar: {[s['name'] for s in similar]}")
+
     prompt = _build_skill_prompt(session_content, obs, observation_report.action)
     print(f"[refiner] Calling LLM for action={observation_report.action}...")
 
@@ -283,6 +325,38 @@ def refine(
     _update_observation_confidence(observation_report.session_id, quality_score)
     _index_skill(filename, skill_type, quality_score, observation_report.tags)
     return skill_path
+
+
+def _existing_skills_text(skills: list) -> str:
+    """Format existing similar skills for inclusion in the LLM prompt."""
+    if not skills:
+        return ""
+    lines = ["Existing similar skills (decide merge vs discard):"]
+    for s in skills:
+        lines.append(f"  - {s['name']} v{s['version']} (qs={s['confidence']}) tags={s['tags']}")
+    return "\n".join(lines)
+
+
+def _search_similar_skills(tags: list) -> list:
+    """FTS5 search skill_index for similar skills based on tag overlap."""
+    try:
+        from indexer import HarnessDB
+        db = HarnessDB(Path(__file__).resolve().parent / "state.db")
+        results = []
+        with db._lock:
+            for tag in tags[:3]:
+                cur = db._conn.execute(
+                    "SELECT name, tags, version, harness_confidence FROM skill_index WHERE tags LIKE ?",
+                    (f"%{tag}%",),
+                )
+                for row in cur.fetchall():
+                    results.append({
+                        "name": row[0], "tags": row[1], "version": row[2], "confidence": row[3],
+                    })
+        db.close()
+        return results[:5]  # Top 5
+    except Exception:
+        return []
 
 
 # ── P₂ helpers ────────────────────────────────────────────────────────
