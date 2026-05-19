@@ -75,22 +75,49 @@ def cmd_observe():
     print(f"[harness] Observation saved: action={report.action}, "
           f"confidence={report.confidence:.2f}")
 
-    # Phase 2: Refiner — generate skill files to review queue (harness/skills/)
-    if report.action in ("patch_skill", "create_skill"):
-        print("[harness] Actionable observation — invoking refiner...")
+    # ── Orchestrate sub-agents ──
+    if report.action in ("patch_skill", "create_skill") and report.confidence > 0.3:
         config = load_config(config_path)
         if config.get("refiner", {}).get("enabled", False):
-            from refiner import refine
-            skill_path = refine(report, session_content, config_path)
-            if skill_path:
-                print(f"[harness] Skill queued for review: {skill_path}")
-                print("[harness] Run 'python harness_daemon.py review' to approve/reject.")
+            # Agent 1: Skill Writer (own LLM session, no observer context leakage)
+            print("[harness] → Agent: skill_writer")
+            from agents.skill_writer import run as skill_writer_run
+            sw_result = skill_writer_run(report, session_content, config)
+            if sw_result and sw_result.get("path"):
+                print(f"[harness] Skill queued: {sw_result['path']}")
+
+                # Agent 2: Fragment Extractor (own LLM session, runs after skill_writer)
+                print("[harness] → Agent: fragment_extractor")
+                from agents.fragment_extractor import run as fragment_extractor_run
+                fragments = fragment_extractor_run(
+                    session_content, report.tags,
+                    sw_result.get("quality_score", report.confidence),
+                    sw_result.get("skill_type", "mental-model"),
+                    config,
+                )
+                print(f"[harness] Fragments extracted: {len(fragments)}")
+
+            # Update observation confidence from skill_writer
+            if sw_result:
+                from agents.skill_writer import _update_observation_confidence
+                _update_observation_confidence(report.session_id, sw_result.get("quality_score", report.confidence))
+
     elif report.action == "update_preference":
-        print("[harness] Preference detected — generating memory update...")
+        print("[harness] Preference detected.")
         from refiner import generate_preference
         pref = generate_preference(report, session_content)
         if pref:
             print(f"[harness] Preference: {pref}")
+
+    elif report.action == "save_fragment":
+        print("[harness] Task-workflow detected — extracting fragments directly.")
+        from agents.fragment_extractor import run as fragment_extractor_run
+        config = load_config(config_path)
+        fragments = fragment_extractor_run(
+            session_content, report.tags, report.confidence,
+            report.skill_type or "task-workflow", config,
+        )
+        print(f"[harness] Fragments extracted: {len(fragments)}")
 
     db.close()
 
