@@ -23,7 +23,7 @@ def load_config(config_path):
 
 
 def cmd_observe():
-    """Phase 1: Analyze the latest session transcript and record observations."""
+    """Phase 1-2: Analyze the latest session transcript, record observations, and invoke refiner."""
     config_path = HARNESS_DIR / "harness_config.yaml"
     config = load_config(config_path)
 
@@ -44,10 +44,36 @@ def cmd_observe():
         print("[harness] No transcript found or nothing to analyze.")
         return
 
+    # Read raw transcript content for refiner
+    session_content = ""
+    if transcript_path.exists():
+        try:
+            session_content = transcript_path.read_text(encoding="utf-8")
+        except Exception:
+            session_content = ""
+
     db = HarnessDB(db_path)
     db.save_observation(report)
     print(f"[harness] Observation saved: action={report.action}, "
           f"confidence={report.confidence:.2f}")
+
+    # Phase 2: If observation is actionable, call refiner
+    if report.action in ("patch_skill", "create_skill"):
+        print("[harness] Actionable observation — invoking refiner...")
+        config = load_config(config_path)
+        if config.get("refiner", {}).get("enabled", False):
+            from refiner import refine
+            skill_path = refine(report, session_content, config_path)
+            if skill_path:
+                print(f"[harness] New skill generated: {skill_path}")
+    elif report.action == "update_preference":
+        print("[harness] Preference detected — generating memory update...")
+        from refiner import generate_preference
+        pref = generate_preference(report, session_content)
+        if pref:
+            print(f"[harness] Preference: {pref}")
+
+    db.close()
 
 
 def cmd_inject():

@@ -2,6 +2,9 @@ harness:
   transcript_dir: "D:\\Claude"
   transcript_file: "memory.jsonl"
   db_path: "D:\\Claude\\harness\\state.db"
+  # Phase 2: Use MCP memory session_summary entities as primary signal source.
+  # Current memory.jsonl stores knowledge-graph relations — low signal.
+  # MCP session summaries contain ❓Request/💡Learned/✅Completed — ideal for skill extraction.
 
 observer:
   min_tool_calls_for_skill: 3
@@ -28,7 +31,7 @@ observer:
       - "起草"
 
 refiner:
-  enabled: false
+  enabled: true
   model: "deepseek-v4-pro"
 
 injector:
