@@ -153,14 +153,17 @@ def analyze_session(
             tags=_guess_tags(content),
         )
 
-    # Rule 3: Complex session with many tool calls → create_skill candidate
+    # Rule 3: Complex session → create_skill candidate
+    # Signal: many tool calls OR rich content (MCP session summaries are high-signal even with 0 tool_use)
     threshold = obs_config["min_tool_calls_for_skill"]
-    if tool_count >= threshold:
+    content_threshold = obs_config.get("min_content_length_for_skill", 500)
+    if tool_count >= threshold or len(content) >= content_threshold:
+        signal = f"tool_calls={tool_count}" if tool_count >= threshold else f"content_len={len(content)}"
         return ObservationReport(
             session_id=f"session_{datetime.now().strftime('%Y%m%d%H%M%S')}",
             action="create_skill",
             confidence=0.5,
-            reason=f"Complex session: {tool_count} tool calls >= {threshold}",
+            reason=f"Complex session: {signal} >= threshold",
             summary=_generate_summary(content),
             tags=_guess_tags(content),
         )
