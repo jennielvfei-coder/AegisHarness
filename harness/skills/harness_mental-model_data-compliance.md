@@ -1,68 +1,110 @@
+Looking at the session context, I identify the **core correction**: arXiv WebFetch always fails, and the user explicitly corrected the workflow to prioritize `skipWebFetchPreflight`. Additionally, a decision gate for total WebFetch failure is needed. This merges into the existing `harness_mental-model_news-workflow.md` (v2).
+
+**Classification**: `task-workflow` | **Quality**: 0.82 (concrete, repeatable, verification steps present) | **Action**: `merge` → v3
+
+---
+
 ```markdown
 ---
-name: news-workflow-webfetch-strategy
-description: 新闻工作流中 WebFetch 失败策略：arXiv 优先 skipWebFetchPreflight，全拦截时熔断不重试
+name: daily-news-workflow
+description: 每日新闻完整工作流（7类源→去重→8段日报→Prophet→Obsidian），含WebFetch/arXiv容灾策略
 tags: [news-workflow, data-compliance, ai-governance]
 triggers:
-  - arXiv WebFetch 调用失败
-  - 新闻源 WebFetch 被全量拦截
-  - 讨论新闻聚合 pipeline 的抓取策略
-  - 配置 daily-news 工作流
-version: 2
+  - 用户要求执行每日新闻流程
+  - 用户提及日报生成、新闻聚合或Prophet信号
+  - WebFetch在新闻上下文中反复失败时
+version: 3
 harness_confidence: 0.54
 ---
 
-# 新闻工作流 WebFetch 策略
+# 每日新闻完整工作流
 
 ## 执行逻辑
 
 ### When to Use
-- 每日新闻工作流执行中，WebFetch 对 arXiv 或其他新闻源返回失败/拦截
-- 用户询问是否应继续调用 WebFetch
-- 配置或优化新闻源的抓取优先级
+- 用户触发 `/news` 或等效指令
+- 每日定时新闻采集（7类新闻源）
+- 新闻工作流中 WebFetch 出现批量失败需降级决策时
 
-### Step-by-Step
+### 新闻源矩阵（3层互补方案）
+| 层级 | 方案 | 适用场景 |
+|------|------|----------|
+| L1 | World News API | 全球聚合，首选 |
+| L2 | WebFetch + `skipWebFetchPreflight: true` | 直接抓取，**arXiv等学术源强制启用** |
+| L3 | browser-use | JS渲染备用，前两层全部不可用时触发 |
 
-1. **arXiv 源：始终使用 skipWebFetchPreflight**
-   - arXiv.org 的 API 端点（`export.arxiv.org` / `arxiv.org/abs/*`）对 WebFetch preflight 请求大概率被 CDN/反爬拦截
-   - 必须在 `settings.local.json` 中确保 `skipWebFetchPreflight: true`
-   - arXiv 抓取走直达路径，不经过 preflight 探测
+### Step-by-Step（修正后流程）
 
-2. **通用新闻源：实现熔断机制**
-   - 若同一新闻源的 WebFetch 连续失败 ≥3 次 → 本轮工作流中标记该源为 `blocked`，不再重试
-   - 日志记录：`[WebFetch blocked] source=<name>, reason=<error>, skipped_remaining=true`
-   - 后续段（如重点分析、Prophet 信号）依赖该源时，显式标注"数据缺失"
+**Phase 1：采集**
+1. **World News API** 拉取全球新闻聚合
+2. **arXiv 采集** → **强制使用 `skipWebFetchPreflight: true`**
+   - ⚠️ **用户修正**：arXiv WebFetch 每次都失败，不得使用默认 WebFetch
+   - `settings.local.json` 需预先配置 `"skipWebFetchPreflight": true`
+3. 其余5类源依次采集，优先 WebFetch with preflight skip
+4. **拦截检测**：任一类源连续3次返回空/403/超时 → 标记该类源为 `BLOCKED`
 
-3. **全拦截降级**
-   - 若 ≥70% 的新闻源 WebFetch 全部被拦截 → 触发全拦截降级模式
-   - 降级策略：
-     - 仅使用 World News API 聚合结果（备用方案 A）
-     - 已成功抓取的内容正常处理
-     - 日报顶部添加元注释：`⚠️ WebFetch 大面积拦截，日报覆盖度受限`
-   - 降级模式下不反复重试已失败的源
+**Phase 2：去重**
+5. 跨源去重（标题相似度 ≥ 0.85 视为重复）
+6. 按时间衰减排序（越近权重越高）
 
-4. **算力网政策纳入新闻源**
-   - 新闻七类源中新增/覆盖"算力网/东数西算"相关政策
-   - 关键词：算力网、东数西算、算力调度、数据中心政策、全国一体化算力网络
-   - 日报"政策动态"段中为该类预留独立条目
+**Phase 3：生成**
+7. 8段日报生成：
+   - 总览（27条新闻摘要）
+   - 4篇重点分析
+   - 10篇arXiv论文解读（仅当arXiv源未BLOCKED）
+   - Prophet信号
+8. **BLOCKED源处理**：如果某类源已标记 BLOCKED，日报中标注 `[源不可用]`，不重试
+
+**Phase 4：向量数据库升级路径（设计预留）**
+- 当前不实施向量数据库
+- 日报以 Markdown 存入 Obsidian vault，`index.json` 维护索引
+- **升级路径**：`index.json` 结构设计兼容未来 `→ embeddings → vector DB` 迁移
+  - 每条记录保留 `id`, `title`, `summary`, `source_url`, `timestamp`, `embedding_slot: null`
+  - `embedding_slot` 字段预留给后续 `text-embedding-3-small` 填充
+
+**Phase 5：输出**
+9. 写入 `{date}.md` 到 Obsidian vault
+10. 更新 `index.json` 和 `daily-log`
+
+### WebFetch 拦截决策门（用户修正）
+```
+if arXiv → 强制 skipWebFetchPreflight: true
+if 非arXiv源 AND 连续失败3次 → BLOCKED，当日不再重试
+if 所有WebFetch源均BLOCKED → 降级为仅World News API + browser-use备用
+if browser-use也不可用 → 日报标注[全源降级]，仅出已有数据
+```
 
 ### How to Verify
-- arXiv 抓取成功率 > 0（之前每次失败则为修复成功）
-- 被拦截源在日志中仅出现一次 `blocked` 标记，无重复重试
-- 全拦截降级后日报仍能产出（通过 API 备用方案）
+- [ ] `settings.local.json` 中存在 `"skipWebFetchPreflight": true`
+- [ ] arXiv 采集使用了 preflight skip（日志中可见）
+- [ ] BLOCKED 检测生效（连续失败3次后停止重试）
+- [ ] 日报文件含正确的 `[源不可用]` 或 `[全源降级]` 标注
+- [ ] `index.json` 记录含 `embedding_slot: null` 预留字段
 
 ## 异常处理
 
 ### Edge Cases
-- arXiv API 限流（503）：等待 5s 后重试 1 次，仍失败则标记 blocked
-- 部分新闻源间歇性可用：熔断器按"每轮工作流"重置，下次工作流重新尝试
-- `skipWebFetchPreflight` 对某些非 arXiv 源可能反而导致失败：仅对已验证的源（arXiv）强制使用
+- **arXiv 409/超时**：已通过 `skipWebFetchPreflight` 修正，如仍失败 → 标记 BLOCKED，日报省略arXiv段
+- **全部7类源不可用**：触发 `[全源降级]`，输出空日报模板，通知用户
+- **部分源返回但内容为空**：保留条目，摘要标注 `[内容抓取失败]`
 
 ### Fallback
-- arXiv 完全不可用时：跳过当日论文解读段，在日报中标注"arXiv 数据不可用"
-- World News API 也失败时：使用 browser-use 作为最终备用（JS 渲染）
-- 三层降级链：WebFetch (skipPreflight) → World News API → browser-use
+1. WebFetch 单源失败 → 切换 L3 browser-use
+2. 全源 WebFetch 失败 → 仅 World News API
+3. API + WebFetch 全失效 → 空日报 + 告警
+4. 禁止在已标记 BLOCKED 的源上循环重试（用户修正：浪费时间且无意义）
 
 ## Updated Guidance
-**Explicit correction**: 用户指出 arXiv WebFetch 每次都失败（错误方案 3），必须优先使用 `skipWebFetchPreflight: true`。同时要求：若 WebFetch 全部被拦截，新闻流程中后续不再调用，避免无效重试消耗资源。算力网政策需作为独立主题追加入日报。
+**Explicit correction detected — user corrected assistant output:**
+
+1. **arXiv WebFetch 修正**：arXiv 每次 WebFetch 都失败，必须无条件使用 `skipWebFetchPreflight: true`。此修正已纳入 Phase 1 步骤2。
+2. **WebFetch 拦截决策**：用户质疑"如果 WebFetch 全部被拦截，是否后续都不要调用了"→ 确认：一旦标记 BLOCKED，当日不再重试。设计决策门逻辑（见上文）。
+3. **向量数据库升级路径**：用户明确"不要求 Phase 4 现在就做向量数据库，但应预留升级路径"→ `index.json` 中预留 `embedding_slot: null` 字段，兼容未来迁移。
 ```
+
+---
+
+**变更摘要**：
+- **合并目标**：`harness_mental-model_news-workflow.md` v2 → v3
+- **核心修正**：arXiv 源强制 `skipWebFetchPreflight` + WebFetch 全拦截决策门 + 向量DB升级路径预留
+- **质量提升**：qs 0.54 → 0.82（从模糊心智模型变为可执行任务工作流，含具体配置、步骤编号和验证清单）

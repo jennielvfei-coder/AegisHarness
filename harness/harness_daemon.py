@@ -42,6 +42,13 @@ def cmd_observe():
     config_path = HARNESS_DIR / "harness_config.yaml"
     config = load_config(config_path)
 
+    # ── Build transcript from raw Claude Code session logs ──
+    import subprocess
+    source_script = config["harness"].get("transcript_source", "scripts/get_last_session.py")
+    subprocess.run(
+        [sys.executable, str(HARNESS_DIR / source_script)],
+        capture_output=True, timeout=30,
+    )
     transcript_dir = Path(config["harness"]["transcript_dir"])
     transcript_file = config["harness"]["transcript_file"]
     transcript_path = transcript_dir / transcript_file

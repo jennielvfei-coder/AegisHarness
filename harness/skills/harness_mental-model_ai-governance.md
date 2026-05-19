@@ -1,90 +1,51 @@
-我来分析 session 上下文中的纠正点，并更新现有技能。
-
-首先进行分类：
-
-**会话分析：**
-- 用户在多个 session 中进行了新闻工作流操作
-- 关键纠正：助手错误地更新了 `claude for legal-zh` 里的 refiner，用户明确表示"我不需要更新 claude for legal-zh 里面的refiner，更新错了"
-- 本质问题：**作用域越界** — 在新闻工作流任务中，助手做出了超出目标范围的文件变更
-
-**分类结果：**
-- SKILL_TYPE: `task-workflow` — 这是一个工作流执行纪律的问题
-- QUALITY_SCORE: `0.68` — 纠正点明确且可重复验证，但需要与现有技能合并
-- ACTION: `merge` — 合并到现有的 `harness_mental-model_news-workflow.md` (v1 → v2)
-
----
-
 ```markdown
 ---
-name: harness_mental-model_news-workflow
-description: 新闻工作流执行纪律：作用域锁定、变更前确认、回滚路径预留
+name: task-context-isolation-before-mutation
+description: 修改文件前必须校验当前工作上下文与目标项目一致，禁止跨项目污染（如将 news-workflow 的更新误写入 legal-zh）
 tags: [ai-governance, data-compliance, news-workflow]
 triggers:
-  - 执行日报生成、新闻抓取、Obsidian vault 更新等新闻工作流任务
-  - 涉及 Harness/MCP 配置变更时
-  - 用户提到"回滚"或纠正助手越界操作时
+  - 涉及多项目/多 repo 交叉操作时的任何文件写入、重构或配置更新
+  - 用户要求"回滚"、"撤销"某次错误写入时
 version: 2
 harness_confidence: 0.54
 ---
 
-# 新闻工作流执行纪律（Scope Discipline）
+# 任务上下文隔离 — 写入前校验
 
 ## 执行逻辑
 
 ### When to Use
-- 执行新闻工作流任意环节（7源抓取 → 去重 → 8段日报 → Prophet信号 → Obsidian vault）
-- 修改 Harness 配置、MCP 设置、或任何 `.local.json` 文件
-- 用户要求在"谓词链"中补缺口或输出 Realize 计划时
-- 任何时候涉及跨文件/跨系统写入时
+用户会话横跨多个项目/子模块（如 news-workflow、legal-zh、Harness 本体）时，**任何写操作前**强制执行本校验。尤其当助手从上下文缓存中提取路径或推断目标时，极易将 A 项目的修改误写入 B 项目的同名文件（如 `refiner` 配置）。
 
 ### Step-by-Step
-1. **作用域锁定 — 先读后写**
-   - 执行任何写入前，明确确认目标文件路径
-   - 列出即将变更的文件清单，向用户确认（至少在心里自检："这个文件属于当前任务域吗？"）
-   - 反例：在新闻工作流任务中，去碰 `claude for legal-zh` 的 refiner 配置
-
-2. **变更前 diff 检查**
-   - 如果是编辑已有文件，先用 `cat` 或 `read` 确认当前内容
-   - 判断该文件是否属于当前技能的管辖范围（新闻工作流 vs 法律工作流 vs 其他域）
-
-3. **单域单任务原则**
-   - 一个任务只操作一个域的文件
-   - 如果需要跨域（如新闻 + 法律），必须先显式拆分任务并分别确认
-
-4. **回滚路径预留**
-   - 任何批量修改前，记录原始状态或确保 git 可回滚
-   - 用户提到"P₂ 单独回滚"意味着每个变更单元应有独立回滚能力
+1. **写入前显式锁定目标**：在 `Write` / `Edit` 工具调用前，先在思考链路中输出 3 要素：
+   - 当前会话主项目（从 session tags / 用户首条指令推断）
+   - 目标文件完整路径
+   - 目标文件所属项目
+2. **交叉比对**：若「目标文件所属项目」≠「当前会话主项目」，**必须向用户确认**再写入。不得静默执行。
+3. **回滚锚点**：每次写入前记录操作摘要（文件路径 + 版本/哈希 + 时间戳），供用户要求"P₂ 单独回滚"时快速定位。
+4. **项目边界清单**（从已知会话提取）：
+   - `news-workflow` → 日报、Prophet 信号、Obsidian vault、arXiv 抓取
+   - `legal-zh` → 法律中文 refiner、合规分析
+   - `harness` → Stop Hook、MCP 进程管理、会话生命周期
 
 ### How to Verify
-- 变更后 `git diff --stat` 只显示目标域的文件
-- 没有"意外触及"的无关文件出现在变更列表中
-- 用户不再需要说"更新错了，我不需要你更新那个"
+- 用户说"回滚 P₂"时，能精确定位到**单次写入**而非整个会话的所有修改。
+- 连续 3 次会话未出现"写错项目"的纠正。
 
 ## 异常处理
 
 ### Edge Cases
-- **arXiv WebFetch 总是失败**：优先使用 `skipWebFetchPreflight: true` 直接抓取，不要反复尝试默认 WebFetch
-- **WebFetch 全部被拦截**：在新闻流程中标记为不可用，后续不再调用，走备用方案（browser-use）
-- **Harness Stop Hook 执行时间过长**：检查是否有 MCP 僵尸进程未清理，方案 B（MCP 配置中增加进程管理）是根治手段，方案 A（Stop Hook 清理脚本）是快速见效手段——**两者一起做**
+- 用户**明确要求**跨项目同步（如"把 news-workflow 的这个配置也复制到 legal-zh"）→ 不拦截，但在响应中标注「跨项目写入」标记。
+- 同一会话中有多个活跃项目 → 每次切换项目时重新锁定上下文。
 
 ### Fallback
-- 如果作用域不确定，先问用户："这个变更涉及 X 和 Y 两个文件，是否都在您的预期范围内？"
-- 如果已经越界，立即执行 `git checkout -- <越界文件>` 回滚，并告知用户
+- 若已发生错误写入（如本会话：news-workflow 的 refiner 更新被误写入 legal-zh），执行**最小回滚**：
+  1. 定位该次写入的单一文件/变更集
+  2. Git 级回滚该文件到上一版本
+  3. 不触及同日其他正确写入
+  4. 重新在当前正确项目下执行原操作
 
 ## Updated Guidance
-**Explicit correction detected** — 用户在 2026-05-19 会话中纠正：助手在新闻工作流任务中错误更新了 `claude for legal-zh` 的 refiner，属于作用域越界。此技能 v2 新增作用域锁定和变更前确认机制，防止跨域污染。同时收录 arXiv WebFetch 失败处理、MCP 僵尸进程治理（A+B 方案并行）、Harness 深度植入等会话中形成的决策。
+用户纠正：助手上次将 P₂（refiner 更新）写入了 `claude for legal-zh`，而非当前的 news-workflow 项目。根本原因是上下文缓存中残留了 legal-zh 的路径引用，助手未经项目归属校验即执行写入。自本版本起，所有写入操作强制执行 Step 1-2 的项目锁定与交叉比对。
 ```
-
----
-
-**合并说明：**
-
-| 项目 | 内容 |
-|------|------|
-| 合并目标 | `harness_mental-model_news-workflow.md` v1 → v2 |
-| 核心纠正 | **作用域越界**：新闻工作流任务中误触 legal-zh 的 refiner |
-| 新增机制 | 作用域锁定、变更前 diff 检查、单域单任务原则、回滚路径预留 |
-| 附带收录 | arXiv skipWebFetchPreflight、MCP 僵尸进程 A+B 并行方案 |
-| Quality | 0.68（纠正点明确，但"谓词链"和"Realize 计划"的具体结构还需后续验证） |
-
-现有的其他 4 个类似技能（ai-governance v2、data-compliance v2 等）与本技能标签重合但关注点不同，**不合并**，保留各自独立。

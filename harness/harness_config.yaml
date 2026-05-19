@@ -1,7 +1,7 @@
 harness:
   transcript_dir: "D:\\Claude\\harness"
   transcript_file: "latest_session.jsonl"
-  transcript_source: "scripts/transcript_source.py"
+  transcript_source: "scripts/get_last_session.py"
   db_path: "D:\\Claude\\harness\\state.db"
 
 observer:
