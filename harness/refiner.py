@@ -43,21 +43,11 @@ The user corrected the assistant during this session. Here's the session context
 The correction was about: {observation.get('summary', '')}
 Tags: {observation.get('tags', [])}
 
-Generate an updated SKILL.md file. FIRST classify the skill:
+FIRST classify the skill (REQUIRED):
+SKILL_TYPE: <env-fix | task-workflow | mental-model>
+QUALITY_SCORE: <0.0-1.0, 0.8+=concrete-repeatable>
 
-**Skill Type (REQUIRED — output on first line):**
-- `env-fix` — environment-level fix that applies across all tasks (e.g., WebFetch preflight, API config)
-- `task-workflow` — steps/templates specific to one task (e.g., "how to generate daily news report")
-- `mental-model` — general reasoning/classification pattern (e.g., "how to downgrade claims when challenged")
-
-**Quality Score (REQUIRED — output on second line):** 0.0-1.0. 0.8+ = concrete, repeatable workflow usable by a fresh session.
-
-Output format:
-```
-SKILL_TYPE: <type>
-QUALITY_SCORE: <0.0-1.0>
-```markdown
----
+Generate an updated SKILL.md file:
 
 ```markdown
 ---
@@ -91,21 +81,11 @@ Tags: {observation.get('tags', [])}
 Context from the session:
 {_truncate(session_content, 3000)}
 
-Generate a new SKILL.md file. FIRST classify the skill:
+FIRST classify the skill (REQUIRED):
+SKILL_TYPE: <env-fix | task-workflow | mental-model>
+QUALITY_SCORE: <0.0-1.0, 0.8+=concrete-repeatable>
 
-**Skill Type (REQUIRED — output on first line):**
-- `env-fix` — environment-level fix that applies across all tasks (e.g., WebFetch preflight, API config)
-- `task-workflow` — steps/templates specific to one task (e.g., "how to generate daily news report")
-- `mental-model` — general reasoning/classification pattern (e.g., "how to downgrade claims when challenged")
-
-**Quality Score (REQUIRED — output on second line):** 0.0-1.0. 0.8+ = concrete, repeatable workflow usable by a fresh session.
-
-Output format:
-```
-SKILL_TYPE: <type>
-QUALITY_SCORE: <0.0-1.0>
-```markdown
----
+Generate a new SKILL.md file:
 
 ```markdown
 ---
@@ -251,48 +231,39 @@ def refine(
         print("[refiner] LLM returned no content.")
         return None
 
-    # Parse SKILL_TYPE and QUALITY_SCORE from LLM response
-    skill_type = "mental-model"  # default
-    quality_score = observation_report.confidence  # default: observer's estimate
+    # ── P₂: Parse SKILL_TYPE + QUALITY_SCORE ──
+    skill_type = "mental-model"
+    quality_score = observation_report.confidence
 
-    type_match = re.search(r'SKILL_TYPE:\s*(\S+)', result)
-    if type_match:
-        skill_type = type_match.group(1).strip()
-        if skill_type not in ("env-fix", "task-workflow", "mental-model"):
-            skill_type = "mental-model"
-        print(f"[refiner] Parsed skill_type={skill_type}")
-
-    qs_match = re.search(r'QUALITY_SCORE:\s*([\d.]+)', result)
-    if qs_match:
+    tm = re.search(r'SKILL_TYPE:\s*(\S+)', result)
+    if tm:
+        val = tm.group(1).strip()
+        if val in ("env-fix", "task-workflow", "mental-model"):
+            skill_type = val
+    qm = re.search(r'QUALITY_SCORE:\s*([\d.]+)', result)
+    if qm:
         try:
-            quality_score = round(float(qs_match.group(1)), 2)
-            quality_score = max(0.0, min(1.0, quality_score))
-            print(f"[refiner] Parsed quality_score={quality_score}")
+            quality_score = round(float(qm.group(1)), 2)
         except ValueError:
             pass
+    print(f"[refiner] type={skill_type} qs={quality_score}")
 
-    # Strip the SKILL_TYPE/QUALITY_SCORE lines from the markdown output
+    # Strip classification lines from output
     skill_content = re.sub(r'^SKILL_TYPE:\s*\S+\s*\n?', '', result, flags=re.MULTILINE)
     skill_content = re.sub(r'^QUALITY_SCORE:\s*[\d.]+\s*\n?', '', skill_content, flags=re.MULTILINE)
-
-    # Add quality_score to frontmatter if markdown has frontmatter
     skill_content = re.sub(
         r'(harness_confidence:\s*)[\d.]+',
-        rf'\g<1>{quality_score}',
-        skill_content,
+        rf'\g<1>{quality_score}', skill_content,
     )
 
-    # Store quality_score back to observations table
-    _update_observation_confidence(observation_report.session_id, quality_score)
-
-    # Route output based on skill_type (P₂ classification)
-    harness_dir = Path(__file__).resolve().parent
-
+    # ── P₂ Route: task-workflow → fragment ──
     if skill_type == "task-workflow":
-        # Store as fragment, not a skill file
-        return _store_fragment(observation_report, skill_content, quality_score)
+        _store_fragment(observation_report, skill_content, quality_score)
+        _update_observation_confidence(observation_report.session_id, quality_score)
+        return None  # Not a skill file
 
-    # env-fix or mental-model → write skill file
+    # ── Determine output path ──
+    harness_dir = Path(__file__).resolve().parent
     if auto_activate:
         skills_dir = Path.home() / ".claude" / "skills"
     else:
@@ -300,88 +271,81 @@ def refine(
 
     skills_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate filename: harness_<type>_<name>.md (P₅ unified path)
+    # Generate filename: harness_<type>_<name>.md
     tag_part = observation_report.tags[0] if observation_report.tags else "general"
     safe_name = re.sub(r'[^a-z0-9-]', '-', tag_part.lower())[:30]
     filename = f"harness_{skill_type}_{safe_name}.md"
     skill_path = skills_dir / filename
 
     skill_path.write_text(skill_content, encoding="utf-8")
-    print(f"[refiner] Skill ({skill_type}, qs={quality_score}) written to: {skill_path}")
+    print(f"[refiner] Skill written to: {skill_path}")
 
+    _update_observation_confidence(observation_report.session_id, quality_score)
     _index_skill(filename, skill_type, quality_score, observation_report.tags)
     return skill_path
 
 
-def _update_observation_confidence(session_id: str, quality_score: float):
-    """Write quality_score back to observations.confidence in state.db."""
+# ── P₂ helpers ────────────────────────────────────────────────────────
+
+def _update_observation_confidence(session_id: str, score: float):
     try:
         from indexer import HarnessDB
-        harness_dir = Path(__file__).resolve().parent
-        db = HarnessDB(harness_dir / "state.db")
+        db = HarnessDB(Path(__file__).resolve().parent / "state.db")
         with db._lock:
             db._conn.execute(
-                "UPDATE observations SET confidence = ? WHERE session_id = ?",
-                (quality_score, session_id),
+                "UPDATE observations SET confidence=? WHERE session_id=?", (score, session_id)
             )
             db._conn.commit()
         db.close()
     except Exception as e:
-        print(f"[refiner] Failed to update observation confidence: {e}")
+        print(f"[refiner] obs update failed: {e}")
 
 
-def _store_fragment(report, content: str, quality_score: float) -> Optional[Path]:
-    """Store a task-workflow as a fragment in the fragments table."""
+def _store_fragment(report, content: str, score: float):
     try:
         from indexer import HarnessDB
-        harness_dir = Path(__file__).resolve().parent
-        db = HarnessDB(harness_dir / "state.db")
+        db = HarnessDB(Path(__file__).resolve().parent / "state.db")
         tag = report.tags[0] if report.tags else "task-workflow"
         with db._lock:
             db._conn.execute(
-                """INSERT INTO fragments (tag, trigger_phrases, content, source_session,
-                   confidence, created_at) VALUES (?, ?, ?, ?, ?, unixepoch())""",
-                (tag, json.dumps(report.tags), content[:2000], report.session_id, quality_score),
+                """INSERT INTO fragments(tag,trigger_phrases,content,source_session,confidence,created_at)
+                   VALUES(?,?,?,?,?,unixepoch())""",
+                (tag, json.dumps(report.tags), content[:2000], report.session_id, score),
             )
             db._conn.commit()
         db.close()
-        print(f"[refiner] Fragment stored: tag={tag}, qs={quality_score}")
-        return Path(f"fragments://{tag}")
+        print(f"[refiner] Fragment stored: tag={tag}")
     except Exception as e:
-        print(f"[refiner] Failed to store fragment: {e}")
-        return None
+        print(f"[refiner] fragment failed: {e}")
 
 
-def _index_skill(filename: str, skill_type: str, quality_score: float, tags: list):
-    """Insert or merge into skill_index; log evolution."""
+def _index_skill(filename: str, stype: str, score: float, tags: list):
     try:
         from indexer import HarnessDB
-        harness_dir = Path(__file__).resolve().parent
-        db = HarnessDB(harness_dir / "state.db")
+        db = HarnessDB(Path(__file__).resolve().parent / "state.db")
         with db._lock:
-            existing = db._conn.execute(
-                "SELECT version FROM skill_index WHERE name = ?", (filename,)
+            prev = db._conn.execute(
+                "SELECT version FROM skill_index WHERE name=?", (filename,)
             ).fetchone()
-            if existing:
-                nv = existing[0] + 1
+            if prev:
+                nv = prev[0] + 1
                 db._conn.execute(
-                    "UPDATE skill_index SET tags=?, version=?, harness_confidence=? WHERE name=?",
-                    (json.dumps(tags, ensure_ascii=False), nv, quality_score, filename),
+                    "UPDATE skill_index SET tags=?,version=?,harness_confidence=?,updated_at=unixepoch() WHERE name=?",
+                    (json.dumps(tags, ensure_ascii=False), nv, score, filename),
                 )
                 db._conn.execute(
                     "INSERT INTO evolution_log(skill_name,action,change_summary,old_version,new_version) VALUES(?,?,?,?,?)",
-                    (filename, "merge", f"Auto-merged v{nv}", existing[0], nv),
+                    (filename, "merge", f"Auto-merged v{nv}", prev[0], nv),
                 )
-                print(f"[refiner] Skill merged: {filename} v{existing[0]} → v{nv}")
             else:
                 db._conn.execute(
                     "INSERT INTO skill_index(name,file_path,tags,version,harness_confidence,created_at) VALUES(?,?,?,1,?,unixepoch())",
-                    (filename, f".claude/skills/{filename}", json.dumps(tags, ensure_ascii=False), quality_score),
+                    (filename, f".claude/skills/{filename}", json.dumps(tags, ensure_ascii=False), score),
                 )
             db._conn.commit()
         db.close()
     except Exception as e:
-        print(f"[refiner] Failed to index skill: {e}")
+        print(f"[refiner] index failed: {e}")
 
 
 def generate_preference(observation_report, session_content: str) -> Optional[str]:
