@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS fragments (
     hit_count INTEGER DEFAULT 0,
     last_hit REAL,
     created_at REAL NOT NULL DEFAULT (unixepoch()),
-    updated_at REAL
+    updated_at REAL,
+    embedding BLOB DEFAULT NULL     -- Phase 4: vector embedding, NULL until Chroma migration
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS fragments_fts USING fts5(
     tag, trigger_phrases, content, content=fragments, content_rowid=id

@@ -1,18 +1,15 @@
 harness:
   transcript_dir: "D:\\Claude\\harness"
   transcript_file: "latest_session.jsonl"
-  mcp_bridge: true
+  transcript_source: "scripts/transcript_source.py"
   db_path: "D:\\Claude\\harness\\state.db"
-  # Phase 2: Use MCP memory session_summary entities as primary signal source.
-  # Current memory.jsonl stores knowledge-graph relations — low signal.
-  # MCP session summaries contain ❓Request/💡Learned/✅Completed — ideal for skill extraction.
 
 observer:
-  # MCP session summaries contain 2-4 entries per session (significantly less than raw transcripts).
-  # Lower thresholds accordingly — quality over quantity for MCP data.
-  min_tool_calls_for_skill: 1
-  min_content_length_for_skill: 500
-  skip_trivial_sessions: false
+  # Only trigger refiner (LLM call) for genuinely complex sessions.
+  # Correction/preference patterns are always checked regardless of thresholds.
+  min_tool_calls_for_skill: 5
+  min_content_length_for_skill: 3000
+  skip_trivial_sessions: true
   patterns:
     correction:
       - "不对"
@@ -42,6 +39,11 @@ injector:
   enabled: true
   max_fragments: 3
   min_confidence: 0.6
+
+mcp_wrapper:
+  enabled: true
+  wrapper_path: "D:\\Claude\\harness\\mcp_wrapper.py"
+  pid_dir: "D:\\Claude\\harness\\.wrapper_pids"
 
 evolution:
   auto_activate: false

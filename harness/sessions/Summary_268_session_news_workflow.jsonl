@@ -1,0 +1,2 @@
+{"role": "user", "content": "今日新闻 — 每日新闻完整工作流（7类新闻源→去重→8段日报→Prophet信号→Obsidian vault）", "session": "Summary_268_session_news_workflow"}
+{"role": "assistant", "content": "Learned: 3个互补方案构成完整中文信息源矩阵：World News API（全球聚合）+ WebFetch with preflight skip（直接抓取）+ browser-use（JS渲染备用）\nCompleted: 生成 2026-05-19 日报（8类总览27条新闻 + 4篇重点分析 + 10篇arXiv论文解读 + Prophet信号），更新 index.json 和 daily-log。修复了 daily-news-trigger 记忆文件（记录WebFetch解决方案）。settings.local.json 添加 skipWebFetchPreflight: true", "session": "Summary_268_session_news_workflow"}

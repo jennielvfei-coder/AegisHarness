@@ -11,7 +11,13 @@ from observer import (
     analyze_session,
     _detect_pattern,
     _count_tool_calls,
+    _count_tool_types,
+    _detect_tool_failures,
+    _detect_implicit_correction,
+    _compute_confidence,
+    _edit_distance,
     _guess_tags,
+    _read_transcript,
 )
 from indexer import HarnessDB
 
@@ -103,6 +109,51 @@ def test_observation_report_fields():
     assert report.confidence == 0.8
     assert report.session_id == "test-123"
     assert report.tags == ["test"]
+
+
+def test_edit_distance():
+    assert _edit_distance("abc", "abc") == 0
+    assert _edit_distance("abc", "abd") == 1
+    assert _edit_distance("", "abc") == 3
+    assert _edit_distance("kitten", "sitting") == 3
+
+
+def test_implicit_correction_detection():
+    """Two similar user messages → implicit correction."""
+    entries = [
+        {"role": "user", "content": "python harness_daemon.py observe"},
+        {"type": "tool_result", "content": "Error: ModuleNotFoundError"},
+        {"role": "user", "content": "python harness_daemon.py observe --debug"},
+    ]
+    assert _detect_implicit_correction(entries) is True
+
+
+def test_no_implicit_correction_dissimilar():
+    """Two very different user messages → no implicit correction."""
+    entries = [
+        {"role": "user", "content": "审查这份合同"},
+        {"role": "user", "content": "今天天气怎么样"},
+    ]
+    assert _detect_implicit_correction(entries) is False
+
+
+def test_tool_failure_detection():
+    entries = [
+        {"type": "tool_result", "content": "Error: connection refused"},
+        {"type": "tool_result", "content": "OK"},
+        {"type": "tool_result", "content": "Traceback (most recent call last):"},
+    ]
+    assert _detect_tool_failures(entries) == 2
+
+
+def test_compute_confidence_ranges():
+    c_high = _compute_confidence(10, 50, 3, 6, True)
+    c_low = _compute_confidence(1, 3, 0, 1, False)
+    c_max = _compute_confidence(20, 100, 10, 10, True)
+    assert c_high > c_low
+    assert 0.0 <= c_low <= 0.5
+    assert 0.6 <= c_high <= 0.95
+    assert c_max >= c_high
 
 
 def test_db_save_and_retrieve():

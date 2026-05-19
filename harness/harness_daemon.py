@@ -16,6 +16,15 @@ from pathlib import Path
 
 import yaml
 
+
+def _truncate(text: str, max_len: int = 60) -> str:
+    """Truncate text cleanly at word boundary, append '...' if cut."""
+    text = text.strip()
+    if len(text) <= max_len:
+        return text
+    cut = text[:max_len].rstrip()
+    return cut + "..."
+
 HARNESS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(HARNESS_DIR))
 
@@ -87,6 +96,73 @@ def _list_pending_skills(skills_dir: Path) -> list:
     return sorted(skills_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
 
 
+def _parse_skill_frontmatter(filepath: Path) -> dict:
+    """Extract name, description, triggers from a SKILL.md frontmatter."""
+    info = {"name": filepath.stem, "description": "", "triggers": []}
+    try:
+        content = filepath.read_text(encoding="utf-8")
+        in_frontmatter = False
+        for line in content.split("\n"):
+            stripped = line.strip()
+            if stripped == "---":
+                if not in_frontmatter:
+                    in_frontmatter = True
+                    continue
+                else:
+                    break
+            if in_frontmatter:
+                if stripped.startswith("name:"):
+                    val = stripped.removeprefix("name:").strip()
+                    if val:
+                        info["name"] = val
+                elif stripped.startswith("description:"):
+                    info["description"] = stripped.removeprefix("description:").strip()
+                elif stripped.startswith("triggers:"):
+                    continue  # list handled below
+                elif stripped.startswith("  - "):
+                    info["triggers"].append(stripped.removeprefix("  - ").strip())
+    except Exception:
+        pass
+    return info
+
+
+def _list_active_skills() -> list[dict]:
+    """Return list of approved/active skills from ~/.claude/skills/ (harness_*.md)."""
+    active_dir = Path.home() / ".claude" / "skills"
+    if not active_dir.exists():
+        return []
+    skills = []
+    for skill_file in sorted(active_dir.glob("harness_*.md")):
+        info = _parse_skill_frontmatter(skill_file)
+        skills.append(info)
+    return skills
+
+
+def _update_claude_md_skill_index(claude_md_path: Path):
+    """Rebuild the skill index table in CLAUDE.md from approved skills."""
+    active = _list_active_skills()
+    header_lines = []
+    table_lines = []
+    table_lines.append("| 触发条件 | 技能名 |")
+    table_lines.append("|----------|--------|")
+    for s in active:
+        trigger = s["description"][:80] or (s["triggers"][0][:80] if s["triggers"] else s["name"])
+        table_lines.append(f"| {trigger} | `harness:{s['name']}` |")
+
+    if not claude_md_path.exists():
+        return
+
+    content = claude_md_path.read_text(encoding="utf-8")
+    marker_start = "## 活跃技能索引"
+    marker_end = "## 待审查技能"
+    if marker_start in content and marker_end in content:
+        before = content.split(marker_start)[0]
+        after_part = content.split(marker_end)[1] if marker_end in content else ""
+        after = marker_end + after_part
+        new_content = before + marker_start + "\n\n" + "\n".join(table_lines) + "\n\n" + after
+        claude_md_path.write_text(new_content, encoding="utf-8")
+
+
 def _search_fragments(db, query: str, max_results: int = 3, min_confidence: float = 0.6):
     """Search the fragments table for matching entries."""
     try:
@@ -116,10 +192,11 @@ def _search_fragments(db, query: str, max_results: int = 3, min_confidence: floa
 
 
 def cmd_inject():
-    """Phase 3: Inject relevant context at session start.
+    """Phase 3: Inject minimal context at session start.
 
     Outputs structured text that Claude Code reads as context:
-      - Pending skill reviews (if any)
+      - Active skills index (name + one-line trigger) — lightweight reference
+      - Pending skill reviews (if any) — compact format
       - Matching prompt fragments from past sessions
     """
     config_path = HARNESS_DIR / "harness_config.yaml"
@@ -135,23 +212,33 @@ def cmd_inject():
 
     lines = []
 
-    # 1. Pending reviews notification
-    pending = _list_pending_skills(skills_dir)
-    if pending:
-        lines.append("## ⚠️ 待审查的技能更新")
+    # 1. Active skills — name + one-line trigger only, no full content
+    active = _list_active_skills()
+    if active:
+        lines.append("## 活跃 Harness 技能")
         lines.append("")
-        for i, skill_path in enumerate(pending, 1):
-            name = skill_path.stem
-            mtime = datetime.fromtimestamp(skill_path.stat().st_mtime)
-            lines.append(f"{i}. **{name}** ({mtime.strftime('%m-%d %H:%M')})")
-            lines.append(f"   审查: `python D:\\Claude\\harness\\harness_daemon.py review`")
+        for s in active:
+            trigger = _truncate(s["description"], 60) or (
+                _truncate(s["triggers"][0], 60) if s["triggers"] else "—"
+            )
+            lines.append(f"- `harness:{s['name']}` — {trigger}")
         lines.append("")
 
-    # 2. Matching fragments from past experience
+    # 2. Pending reviews — compact format
+    pending = _list_pending_skills(skills_dir)
+    if pending:
+        lines.append(f"## 待审查技能 ({len(pending)})")
+        lines.append("")
+        for i, skill_path in enumerate(pending, 1):
+            info = _parse_skill_frontmatter(skill_path)
+            trigger = _truncate(info["description"], 50) or info["name"]
+            lines.append(f"{i}. `{skill_path.stem}` — {trigger} → `review --show {i}`")
+        lines.append("")
+
+    # 3. Matching fragments from past experience
     from indexer import HarnessDB
     db = HarnessDB(db_path)
 
-    # Try to get current task context from environment or recent observations
     recent = db.get_recent_observations(3)
     if recent:
         query = " ".join(
@@ -165,7 +252,7 @@ def cmd_inject():
                 min_confidence=injector_cfg.get("min_confidence", 0.6),
             )
             if fragments:
-                lines.append("## 🧠 相关记忆片段")
+                lines.append("## 相关记忆片段")
                 lines.append("")
                 for f in fragments:
                     lines.append(f"- [{f['tag']}] (置信度: {f['confidence']:.0%}) {f['content']}")
@@ -177,6 +264,304 @@ def cmd_inject():
         print("\n".join(lines))
     else:
         print("[harness] injector: no context to inject.")
+
+
+# ─── cleanup ──────────────────────────────────────────────────────────
+
+def _load_active_wrapper_pids(config):
+    """Return dict of {label: {wrapper_pid, child_pid, start_time}} from PID files."""
+    wrapper_cfg = config.get("mcp_wrapper", {})
+    if not wrapper_cfg.get("enabled", False):
+        return {}
+    pid_dir = Path(wrapper_cfg.get("pid_dir", ""))
+    if not pid_dir or not pid_dir.exists():
+        return {}
+    active = {}
+    for pid_file in pid_dir.glob("*.json"):
+        try:
+            data = json.loads(pid_file.read_text(encoding="utf-8"))
+            # Verify the wrapper process is still alive
+            wrapper_pid = data.get("wrapper_pid")
+            if wrapper_pid:
+                import os as _os
+                try:
+                    _os.kill(wrapper_pid, 0)  # signal 0 = existence check
+                except OSError:
+                    # Wrapper is dead — stale PID file, clean it up
+                    pid_file.unlink(missing_ok=True)
+                    continue
+            active[data.get("label", pid_file.stem)] = data
+        except Exception:
+            pass
+    return active
+
+
+def cmd_cleanup():
+    """Kill orphaned MCP server processes, skipping those managed by active wrappers."""
+    import subprocess as sp
+
+    config_path = HARNESS_DIR / "harness_config.yaml"
+    config = load_config(config_path)
+
+    # Load active wrapper registry
+    active_wrappers = _load_active_wrapper_pids(config)
+    protected_pids = set()
+    for data in active_wrappers.values():
+        if data.get("wrapper_pid"):
+            protected_pids.add(data["wrapper_pid"])
+        if data.get("child_pid"):
+            protected_pids.add(data["child_pid"])
+
+    if active_wrappers:
+        labels = ", ".join(active_wrappers.keys())
+        print(f"[harness] Active wrappers: {labels} — protected PIDs: {protected_pids}")
+
+    mcp_patterns = [
+        r"local_deep_research\.mcp",
+        r"browser_use\.mcp",
+        r"world-news-api",
+        r"server-memory",
+    ]
+    killed = []
+    skipped = []
+
+    for pattern in mcp_patterns:
+        try:
+            result = sp.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    f"Get-WmiObject Win32_Process -Filter \"name='python.exe'\" | "
+                    f"Where-Object {{ $_.CommandLine -match '{pattern}' }} | "
+                    f"ForEach-Object {{ $_.ProcessId }}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            pids = [int(p.strip()) for p in result.stdout.strip().split() if p.strip().isdigit()]
+            for pid in pids:
+                if pid in protected_pids:
+                    skipped.append((pattern, pid))
+                else:
+                    try:
+                        sp.run(
+                            ["taskkill", "/F", "/PID", str(pid)],
+                            capture_output=True,
+                            timeout=5,
+                        )
+                        killed.append((pattern, pid))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    # Also check for node MCP processes
+    try:
+        result = sp.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-WmiObject Win32_Process -Filter \"name='node.exe'\" | "
+                "Where-Object { $_.CommandLine -match 'server-memory|world-news-api' } | "
+                "ForEach-Object { $_.ProcessId }",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        pids = [int(p.strip()) for p in result.stdout.strip().split() if p.strip().isdigit()]
+        for pid in pids:
+            if pid in protected_pids:
+                skipped.append(("node-mcp", pid))
+            else:
+                try:
+                    sp.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, timeout=5)
+                    killed.append(("node-mcp", pid))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    if killed:
+        print(f"[harness] Cleanup killed {len(killed)} orphan(s): "
+              f"{', '.join(f'{p} (PID {i})' for p, i in killed)}")
+    if skipped:
+        print(f"[harness] Cleanup skipped {len(skipped)} active process(es): "
+              f"{', '.join(f'{p} (PID {i})' for p, i in skipped)}")
+    if not killed and not skipped:
+        print("[harness] Cleanup: no MCP processes found")
+
+    # Clean up stale PID files (wrappers that died without atexit cleanup)
+    wrapper_cfg = config.get("mcp_wrapper", {})
+    pid_dir = Path(wrapper_cfg.get("pid_dir", ""))
+    if pid_dir and pid_dir.exists():
+        for pid_file in pid_dir.glob("*.json"):
+            try:
+                data = json.loads(pid_file.read_text(encoding="utf-8"))
+                wp = data.get("wrapper_pid")
+                if wp:
+                    import os as _os
+                    try:
+                        _os.kill(wp, 0)
+                    except OSError:
+                        pid_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+# ─── status ───────────────────────────────────────────────────────────
+
+def cmd_status():
+    """Print unified harness health report."""
+    import subprocess as sp
+
+    config_path = HARNESS_DIR / "harness_config.yaml"
+    config = load_config(config_path)
+
+    print(f"\n{'='*60}")
+    print(f"  Harness Health Report — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*60}\n")
+
+    # 1. Config
+    print("── Config ──")
+    print(f"  Transcript dir : {config['harness']['transcript_dir']}")
+    print(f"  DB path         : {config['harness']['db_path']}")
+    print(f"  MCP bridge      : {config['harness'].get('mcp_bridge', False)}")
+    print(f"  Refiner         : {'ON' if config.get('refiner', {}).get('enabled') else 'OFF'}")
+    print(f"  Injector        : {'ON' if config.get('injector', {}).get('enabled') else 'OFF'}")
+    wrapper_cfg = config.get("mcp_wrapper", {})
+    print(f"  MCP Wrapper     : {'ON' if wrapper_cfg.get('enabled') else 'OFF'}")
+    if wrapper_cfg.get("pid_dir"):
+        print(f"  PID dir         : {wrapper_cfg['pid_dir']}")
+
+    # 2. Wrapper status
+    print("\n── MCP Wrappers ──")
+    active_wrappers = _load_active_wrapper_pids(config)
+    if active_wrappers:
+        for label, data in active_wrappers.items():
+            print(f"  ✅ {label}")
+            print(f"     wrapper PID {data['wrapper_pid']}  |  child PID {data['child_pid']}  |  "
+                  f"started {data.get('start_time', '?')[:19]}")
+    else:
+        print("  (no active wrappers)")
+
+    # Check for stale PID files
+    wrapper_cfg = config.get("mcp_wrapper", {})
+    pid_dir = Path(wrapper_cfg.get("pid_dir", ""))
+    stale = []
+    if pid_dir and pid_dir.exists():
+        for pf in pid_dir.glob("*.json"):
+            if pf.stem not in active_wrappers:
+                stale.append(pf.stem)
+    if stale:
+        print(f"\n  ⚠️  Stale PID files: {', '.join(stale)}")
+
+    # 3. Orphaned MCP processes
+    print("\n── Orphan Detection ──")
+    protected_pids = set()
+    for data in active_wrappers.values():
+        if data.get("wrapper_pid"):
+            protected_pids.add(data["wrapper_pid"])
+        if data.get("child_pid"):
+            protected_pids.add(data["child_pid"])
+
+    mcp_patterns = [
+        r"local_deep_research\.mcp",
+        r"browser_use\.mcp",
+        r"world-news-api",
+        r"server-memory",
+    ]
+    orphans = []
+    for pattern in mcp_patterns:
+        try:
+            result = sp.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    f"Get-WmiObject Win32_Process -Filter \"name='python.exe'\" | "
+                    f"Where-Object {{ $_.CommandLine -match '{pattern}' }} | "
+                    f"ForEach-Object {{ $_.ProcessId }}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            pids = [int(p.strip()) for p in result.stdout.strip().split() if p.strip().isdigit()]
+            for pid in pids:
+                if pid not in protected_pids:
+                    orphans.append((pattern, pid))
+        except Exception:
+            pass
+    try:
+        result = sp.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-WmiObject Win32_Process -Filter \"name='node.exe'\" | "
+                "Where-Object { $_.CommandLine -match 'server-memory|world-news-api' } | "
+                "ForEach-Object { $_.ProcessId }",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        pids = [int(p.strip()) for p in result.stdout.strip().split() if p.strip().isdigit()]
+        for pid in pids:
+            if pid not in protected_pids:
+                orphans.append(("node-mcp", pid))
+    except Exception:
+        pass
+
+    if orphans:
+        print(f"  🔴 {len(orphans)} orphan(s) detected:")
+        for pattern, pid in orphans:
+            print(f"     {pattern} (PID {pid})")
+    else:
+        print("  🟢 No orphaned MCP processes")
+
+    # 4. Harness DB stats
+    print("\n── Harness DB ──")
+    db_path = Path(config["harness"]["db_path"])
+    if db_path.exists():
+        from indexer import HarnessDB
+        db = HarnessDB(db_path)
+        try:
+            observations = db.get_recent_observations(100)
+            print(f"  Total observations : {len(observations)} (recent 100)")
+            if observations:
+                actions = {}
+                for obs in observations:
+                    a = obs.get("action", "unknown")
+                    actions[a] = actions.get(a, 0) + 1
+                for a, c in sorted(actions.items(), key=lambda x: -x[1]):
+                    print(f"    {a}: {c}")
+
+            cur = db._conn.execute("SELECT COUNT(*) FROM fragments")
+            frag_count = cur.fetchone()[0]
+            print(f"  Total fragments    : {frag_count}")
+        except Exception as e:
+            print(f"  DB query error: {e}")
+        db.close()
+    else:
+        print("  No database found")
+
+    # 5. Pending reviews
+    print("\n── Pending Reviews ──")
+    skills_dir = HARNESS_DIR / "skills"
+    pending = _list_pending_skills(skills_dir)
+    if pending:
+        print(f"  {len(pending)} skill(s) waiting:")
+        for spath in pending[:5]:
+            print(f"    - {spath.name}")
+    else:
+        print("  (none)")
+
+    print(f"\n{'='*60}\n")
 
 
 # ─── review ───────────────────────────────────────────────────────────
@@ -219,18 +604,28 @@ def cmd_review(cli_args=None):
             print(f"[harness] Invalid number. Choose 1-{len(pending)}.")
         return
 
-    # --approve: move skill to active directory
+    # --approve: move skill to active directory, update CLAUDE.md
     if args.approve:
         idx = args.approve - 1
         if 0 <= idx < len(pending):
             skill_path = pending[idx]
-            active_dir = Path.home() / ".claude" / "skills" / "harness"
+            active_dir = Path.home() / ".claude" / "skills"
             active_dir.mkdir(parents=True, exist_ok=True)
-            dest = active_dir / skill_path.name
+            dest = active_dir / skill_path.name  # harness_<type>_<name>.md
             shutil.copy2(skill_path, dest)
             skill_path.unlink()  # Remove from review queue
             print(f"[harness] ✅ Approved: {skill_path.name}")
             print(f"[harness]    Activated: {dest}")
+
+            # Update CLAUDE.md skill index
+            for candidate in [
+                Path("D:/Claude/CLAUDE.md"),
+                Path("D:/Claude/.claude/CLAUDE.md"),
+            ]:
+                if candidate.exists():
+                    _update_claude_md_skill_index(candidate)
+                    print(f"[harness]    Updated: {candidate}")
+                    break
         else:
             print(f"[harness] Invalid number. Choose 1-{len(pending)}.")
         return
@@ -259,20 +654,28 @@ def cmd_review(cli_args=None):
         name = skill_path.stem
         desc = ""
         tags = ""
+        qs = ""
+        stype = ""
         for line in content.split("\n"):
             if line.startswith("description:"):
                 desc = line.replace("description:", "").strip()
             if line.startswith("tags:"):
                 tags = line.replace("tags:", "").strip()
+            if line.startswith("harness_confidence:"):
+                qs = line.replace("harness_confidence:", "").strip()
+            if line.startswith("skill_type:"):
+                stype = line.replace("skill_type:", "").strip()
         mtime = datetime.fromtimestamp(skill_path.stat().st_mtime)
-        print(f"  [{i}] {name}")
+        type_tag = f"[{stype}]" if stype else ""
+        qs_tag = f"qs={qs}" if qs else ""
+        print(f"  [{i}] {name} {type_tag} {qs_tag}")
         print(f"      描述: {desc[:80]}")
         print(f"      标签: {tags}")
         print(f"      时间: {mtime.strftime('%Y-%m-%d %H:%M')}")
         print()
     print(f"  操作:")
     print(f"    python harness_daemon.py review --show N    # 查看全文")
-    print(f"    python harness_daemon.py review --approve N # 批准 → 激活到 .claude/skills/harness/")
+    print(f"    python harness_daemon.py review --approve N # 批准 → 激活到 .claude/skills/")
     print(f"    python harness_daemon.py review --reject N  # 拒绝 → 归档")
     print()
 
@@ -283,7 +686,7 @@ def main():
     parser = argparse.ArgumentParser(description="Harness daemon")
     parser.add_argument(
         "command",
-        choices=["observe", "inject", "review"],
+        choices=["observe", "inject", "review", "cleanup", "status"],
         nargs="?",
         default=None,
     )
@@ -298,6 +701,10 @@ def main():
         elif args.command == "review":
             # Route remaining args to review handler
             cmd_review(remaining)
+        elif args.command == "cleanup":
+            cmd_cleanup()
+        elif args.command == "status":
+            cmd_status()
         else:
             parser.print_help()
     except Exception as e:
