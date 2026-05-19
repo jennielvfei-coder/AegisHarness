@@ -1,56 +1,90 @@
+我来分析 session 上下文中的纠正点，并更新现有技能。
+
+首先进行分类：
+
+**会话分析：**
+- 用户在多个 session 中进行了新闻工作流操作
+- 关键纠正：助手错误地更新了 `claude for legal-zh` 里的 refiner，用户明确表示"我不需要更新 claude for legal-zh 里面的refiner，更新错了"
+- 本质问题：**作用域越界** — 在新闻工作流任务中，助手做出了超出目标范围的文件变更
+
+**分类结果：**
+- SKILL_TYPE: `task-workflow` — 这是一个工作流执行纪律的问题
+- QUALITY_SCORE: `0.68` — 纠正点明确且可重复验证，但需要与现有技能合并
+- ACTION: `merge` — 合并到现有的 `harness_mental-model_news-workflow.md` (v1 → v2)
+
+---
+
 ```markdown
 ---
-name: daily-news-workflow
-description: 每日新闻完整工作流（7类新闻源→去重→8段日报→Prophet信号→Obsidian vault）
+name: harness_mental-model_news-workflow
+description: 新闻工作流执行纪律：作用域锁定、变更前确认、回滚路径预留
 tags: [ai-governance, data-compliance, news-workflow]
-version: 0.3.0
-auto_generated: true
+triggers:
+  - 执行日报生成、新闻抓取、Obsidian vault 更新等新闻工作流任务
+  - 涉及 Harness/MCP 配置变更时
+  - 用户提到"回滚"或纠正助手越界操作时
+version: 2
 harness_confidence: 0.54
 ---
 
-# Daily News Workflow (新闻每日流水线)
+# 新闻工作流执行纪律（Scope Discipline）
 
-## When to Use
-当用户要求执行或调整新闻采集、汇总、生成日报、发布到 Obsidian 的完整流程时。适用于任何需要对工作流中的抓取策略、去重规则、日报段数、Prophet 信号或 Harness 钩子（Start/Stop）进行修正的场景。
+## 执行逻辑
 
-## Correction (2026-05-19 session)
-**错误记录**：在之前的会话中，助手错误地将一次学习/更新应用到了 `claude-for-legal-zh` 技能中的 `refiner`，而非当前新闻工作流技能。该 refiner 与法律中文处理相关，与新闻流水线无关。  
-**正确做法**：所有关于新闻工作流本身的修正——包括 Harness Stop Hook 的进程清理、WebFetch 预检跳过、MCP 僵尸进程治理——必须写入本技能文件（`daily-news-workflow`）。不要触碰 `legal-zh/refiner` 或任何其他无关技能。  
-**回滚指示**：如果此前不慎更新了 `claude-for-legal-zh` 的 refiner，需要单独回滚 `P₂`（即 `refiner` 节点）至上一个版本，确保法律技能不受污染。
+### When to Use
+- 执行新闻工作流任意环节（7源抓取 → 去重 → 8段日报 → Prophet信号 → Obsidian vault）
+- 修改 Harness 配置、MCP 设置、或任何 `.local.json` 文件
+- 用户要求在"谓词链"中补缺口或输出 Realize 计划时
+- 任何时候涉及跨文件/跨系统写入时
 
-## Updated Guidance (from session session_20260519142144)
+### Step-by-Step
+1. **作用域锁定 — 先读后写**
+   - 执行任何写入前，明确确认目标文件路径
+   - 列出即将变更的文件清单，向用户确认（至少在心里自检："这个文件属于当前任务域吗？"）
+   - 反例：在新闻工作流任务中，去碰 `claude for legal-zh` 的 refiner 配置
 
-### Harness Stop Hook 进程清理（脚本方案，推荐先实施）
-在 Harness 的 Stop 钩子中添加清理脚本，每次会话结束后自动杀掉已知的 MCP 僵尸进程。该脚本应作为 `daily-news-workflow` 脚手架的一部分，位于 `hooks/stop-cleanup.sh`。  
-**推荐启用原因**：快速见效，无需改动 MCP 配置；可立即降低因未释放端口导致的后续启动失败。
+2. **变更前 diff 检查**
+   - 如果是编辑已有文件，先用 `cat` 或 `read` 确认当前内容
+   - 判断该文件是否属于当前技能的管辖范围（新闻工作流 vs 法律工作流 vs 其他域）
 
-### MCP 进程管理（根治方案，预留设计）
-方案 B：在 MCP 配置中增加进程生命周期管理（如 `process.cleanup` 或 `restartPolicy`），从源头避免僵尸进程。  
-**当前阶段**：不要求立刻实现，但必须在设计上预留升级路径。技能中应记录需要监控的 MCP 服务列表（browser-use, arXiv fetcher 等），并在 `setup/mcp-config.yaml` 中保留 `cleanup` 字段（默认注释），待后续启用。
+3. **单域单任务原则**
+   - 一个任务只操作一个域的文件
+   - 如果需要跨域（如新闻 + 法律），必须先显式拆分任务并分别确认
 
-### WebFetch 预检跳过与 arXiv 拉取
-- **问题**：arXiv 的 WebFetch 每次都被拦截，即使设置 `skipWebFetchPreflight: true` 仍不稳定。  
-- **修正**：在新闻流程中，对于已知需要 JS 渲染或存在反爬的源，应优先使用 `browser-use` 方案，WebFetch 仅作为无拦截源（如 RSS 直链）的备选。  
-- **配置更新**：`settings.local.json` 中 `skipWebFetchPreflight` 仍保留为 `true`，但工作流 Step 2（源抓取）会首先尝试 browser-use 当源标识包含 `[js-render]` 标签。
+4. **回滚路径预留**
+   - 任何批量修改前，记录原始状态或确保 git 可回滚
+   - 用户提到"P₂ 单独回滚"意味着每个变更单元应有独立回滚能力
 
-### 日报内容追加规则
-- 算力网政策类新闻必须追加到当日日报（如 `2026-05-19.md`）的“政策与监管”段。  
-- 去重时注意：相同政策的不同解读可能来自多源，保留首发源并合并观点至重点分析。
+### How to Verify
+- 变更后 `git diff --stat` 只显示目标域的文件
+- 没有"意外触及"的无关文件出现在变更列表中
+- 用户不再需要说"更新错了，我不需要你更新那个"
 
-## How To
-1. **确保回滚**（若已误改）：  
-   对 `claude-for-legal-zh/refiner` 执行 `git checkout HEAD~1 -- refiner/`，仅回滚该子路径，不波及新闻技能。
-2. **添加 Stop Hook 清理脚本**：  
-   在本技能目录下创建 `hooks/stop-cleanup.sh`，内容为 `pkill -f "mcp-server"` 等，并在 Harness 配置的 `stop` 生命周期中引用。
-3. **更新 MCP 配置预留**：  
-   在 `setup/mcp-config.yaml` 中添加注释的 cleanup 块，注明“根治方案预留，勿删除”。
-4. **调整抓取顺序**：  
-   修改 `fetch_sources` 函数，先检测源标签，若为 `[js-render]` 则调用 browser-use，否则走 WebFetch 且附带 `skipWebFetchPreflight: true`。
-5. **记录修正**：  
-   每次会话结束后，若还有进程残留，检查 `hooks/stop-cleanup.sh` 是否生效；若无效，则升级为 MCP 进程管理。
+## 异常处理
 
-## Validation
-- 跑一次完整的 `daily-news` 流程，观察 Stop Hook 是否在会话结束时被触发，日志中无 MCP 进程残留。
-- 检查 `claude-for-legal-zh` 的 refiner 未被修改（`git diff` 无变化）。
-- arXiv 论文抓取不再尝试 WebFetch 直连，全部通过 browser-use 完成。
+### Edge Cases
+- **arXiv WebFetch 总是失败**：优先使用 `skipWebFetchPreflight: true` 直接抓取，不要反复尝试默认 WebFetch
+- **WebFetch 全部被拦截**：在新闻流程中标记为不可用，后续不再调用，走备用方案（browser-use）
+- **Harness Stop Hook 执行时间过长**：检查是否有 MCP 僵尸进程未清理，方案 B（MCP 配置中增加进程管理）是根治手段，方案 A（Stop Hook 清理脚本）是快速见效手段——**两者一起做**
+
+### Fallback
+- 如果作用域不确定，先问用户："这个变更涉及 X 和 Y 两个文件，是否都在您的预期范围内？"
+- 如果已经越界，立即执行 `git checkout -- <越界文件>` 回滚，并告知用户
+
+## Updated Guidance
+**Explicit correction detected** — 用户在 2026-05-19 会话中纠正：助手在新闻工作流任务中错误更新了 `claude for legal-zh` 的 refiner，属于作用域越界。此技能 v2 新增作用域锁定和变更前确认机制，防止跨域污染。同时收录 arXiv WebFetch 失败处理、MCP 僵尸进程治理（A+B 方案并行）、Harness 深度植入等会话中形成的决策。
 ```
+
+---
+
+**合并说明：**
+
+| 项目 | 内容 |
+|------|------|
+| 合并目标 | `harness_mental-model_news-workflow.md` v1 → v2 |
+| 核心纠正 | **作用域越界**：新闻工作流任务中误触 legal-zh 的 refiner |
+| 新增机制 | 作用域锁定、变更前 diff 检查、单域单任务原则、回滚路径预留 |
+| 附带收录 | arXiv skipWebFetchPreflight、MCP 僵尸进程 A+B 并行方案 |
+| Quality | 0.68（纠正点明确，但"谓词链"和"Realize 计划"的具体结构还需后续验证） |
+
+现有的其他 4 个类似技能（ai-governance v2、data-compliance v2 等）与本技能标签重合但关注点不同，**不合并**，保留各自独立。

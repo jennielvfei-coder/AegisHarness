@@ -13,6 +13,7 @@ import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import yaml
 
@@ -191,6 +192,49 @@ def _search_fragments(db, query: str, max_results: int = 3, min_confidence: floa
         return []
 
 
+def _read_last_user_message() -> Optional[str]:
+    """Read the most recent user message from history.jsonl or latest_session."""
+    history_path = Path.home() / ".claude" / "history.jsonl"
+    if history_path.exists():
+        try:
+            with open(history_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            if lines:
+                last = json.loads(lines[-1].strip())
+                return last.get("display", "")[:300]
+        except Exception:
+            pass
+    # Fallback: read from latest_session.jsonl
+    session_path = HARNESS_DIR / "latest_session.jsonl"
+    if session_path.exists():
+        try:
+            with open(session_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    entry = json.loads(line.strip())
+                    if entry.get("role") == "user":
+                        return entry.get("content", "")[:300]
+        except Exception:
+            pass
+    return None
+
+
+def _match_triggers(skills: list[dict], user_message: str) -> list[dict]:
+    """Match user message against skill trigger patterns. Return matched skills."""
+    matched = []
+    msg_lower = user_message.lower()
+    for s in skills:
+        triggers = s.get("triggers", [])
+        if not triggers:
+            continue
+        hits = [t for t in triggers if t.lower() in msg_lower or any(
+            kw in msg_lower for kw in t.lower().split()
+        )]
+        if hits:
+            s["matched_triggers"] = hits
+            matched.append(s)
+    return matched[:3]
+
+
 def cmd_inject():
     """Phase 3: Inject minimal context at session start.
 
@@ -235,7 +279,19 @@ def cmd_inject():
             lines.append(f"{i}. `{skill_path.stem}` — {trigger} → `review --show {i}`")
         lines.append("")
 
-    # 3. Matching fragments from past experience
+    # 3. Trigger matching — suggest skills for current session topic
+    current_topic = _read_last_user_message()
+    if current_topic and active:
+        matched = _match_triggers(active, current_topic)
+        if matched:
+            lines.append("## 检测到相关技能")
+            lines.append("")
+            for m in matched:
+                lines.append(f"- `harness:{m['name']}` — {m['description'][:80]}")
+                lines.append(f"  触发: {', '.join(m['matched_triggers'][:3])}")
+            lines.append("")
+
+    # 4. Matching fragments from past experience
     from indexer import HarnessDB
     db = HarnessDB(db_path)
 
