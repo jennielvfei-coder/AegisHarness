@@ -1,0 +1,43 @@
+# Secrets & config with keys
+.mcp.json
+
+# Node.js tooling
+node.exe
+node_modules/
+npm
+npm.cmd
+npm.ps1
+npx
+npx.cmd
+npx.ps1
+corepack
+corepack.cmd
+nodevars.bat
+npm-cache/
+npm-global/
+*.msi
+
+# Cache & plugin data
+.cache/
+.claude/
+
+# Personal data
+input/
+output/
+memory.jsonl
+
+# Cloned external repos
+browser-use/
+local-deep-research/
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

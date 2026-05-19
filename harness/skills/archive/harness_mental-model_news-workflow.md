@@ -1,67 +1,124 @@
 ```markdown
 ---
-name: news-workflow-refiner-update-isolation
-description: When modifying refiner/pipeline configurations for the daily news workflow, isolate changes to the correct workflow files and avoid inadvertently touching unrelated skills (e.g., legal‑zh).
-tags: [news-workflow, data-compliance, ai-governance]
+name: news-workflow-failure-handling
+description: 新闻工作流的 WebFetch 失败处理与 Harness 停止钩子僵尸进程清理
+tags: [news-workflow, ai-governance, data-compliance]
 triggers:
-  - User requests rollback, update, or adjustment of "refiner" or pipeline files in the context of the daily news workflow.
-  - User corrects an assistant action that mistakenly changed a different skill’s file (e.g., claude‑for‑legal‑zh refiner).
-version: 1
+  - 新闻工作流中 WebFetch 持续返回空或超时
+  - 会话结束后 stop hooks 执行时间过长（>30s）
+  - arXiv 论文抓取全部失败
+version: 2
 harness_confidence: 0.54
 ---
 
-# Refiner Update Isolation for Daily News Workflow
+# 新闻工作流故障处理
 
 ## 执行逻辑
 
 ### When to Use
-- You are asked to update, roll back, or modify refiner files, pipeline step definitions, or quality‑control configurations **that belong to the daily‑news workflow** (`今日新闻 → 8段日报 → Prophet → Obsidian`).
-- The conversation mentions `P₂` rollback, `refiner`, `pipeline`, or `config` and the primary **intent** is to adjust the news workflow, not other skills (e.g., legal‑zh, code‑gen, etc.).
+- 每日新闻工作流运行时，WebFetch 对特定源（arXiv、部分新闻站）持续返回空结果
+- 会话结束后 Harness stop hooks 挂起超过 30 秒
+- `ps aux | grep mcp` 发现残留的 MCP 僵尸进程
+
+### 核心修正（用户纠正）
+
+**修正 1：arXiv WebFetch 全部失败 → 优先 skipWebFetchPreflight**
+
+原流程对所有源统一使用 WebFetch，但 arXiv 的 WebFetch 每次都失败。用户明确指出应优先使用 `skipWebFetchPreflight: true`（已在 settings.local.json 中配置），对已知拦截源直接跳过 preflight，若仍失败则标记为该源不可用，当日不再重试。
+
+**修正 2：Stop hooks 执行时间过长 → 需要进程清理**
+
+用户纠正：stop hooks 长时间运行的根本原因是 MCP 子进程未正确回收。需要在 Harness Stop Hook 中植入清理脚本。
 
 ### Step-by-Step
-1. **Identify the target file set**  
-   - Ask yourself: *Which workflow’s refiner is being changed?*  
-   - Confirm the absolute or relative path(s) in the Obsidian vault / harness config.  
-   - For the daily news workflow, typical paths include:  
-     - `skills/daily-news-refiner.md`  
-     - `configs/news-workflow-pipeline.json`  
-     - `memory/daily-news-trigger/*`  
-   - **If the user mentions only “refiner” without specifying which one, prompt:**  
-     _“确认一下：你是要更新 每日新闻工作流 的 refiner，还是其他技能（如 legal‑zh）的 refiner？请提供确切文件路径。”_
 
-2. **Before any modification, echo the intended scope**  
-   - List every file that will be touched, plus a one‑sentence reason for each.  
-   - Ask for explicit approval before execution.
+#### A. WebFetch 逐源降级策略
 
-3. **Isolate rollbacks (P₂ scenario)**  
-   - When the user says “P₂ 单独回滚到上个版本”, **interpret “P₂” as the specific sub‑component** of the news workflow (e.g., stage‑2 analysis or refiner step), not the whole skill system.  
-   - Use version control (git) to revert only the commits/changes that touched the **identified files**. Do not revert unrelated files.  
-   - Validate with `git diff --name-only` after the rollback to confirm **only** the daily‑news files were altered.
+1. **检查源类型**：区分三类源
+   - 聚合 API（World News API）→ 正常调用，不受 WebFetch 影响
+   - 直接抓取源 → 使用 WebFetch + `skipWebFetchPreflight: true`
+   - JS 渲染备用 → 仅在前两者均失败时启用 browser-use
 
-4. **Double‑check after the change**  
-   - After applying any update or rollback, list the files that were modified.  
-   - Compare that list against the intended scope.  
-   - Run a quick test: check that the news workflow’s main entry point (`daily-news-trigger.md` or equivalent) still references the updated refiner correctly, and that unrelated skills (e.g., `claude‑for‑legal‑zh`) remain untouched.
+2. **arXiv 特殊处理**（用户纠正）：
+   - arXiv **必须优先使用** `skipWebFetchPreflight: true`
+   - 若仍然失败 → 标记 `arxiv_unavailable: true`
+   - 当日日报中 arXiv 段标注「arXiv API 不可用，论文解读跳过」
+   - **不要反复重试** arXiv WebFetch——一次失败即放弃当日该源
+
+3. **全局 WebFetch 拦截判断**：
+   - 若连续 3 个不同域名的 WebFetch 均失败 → 判定为全局拦截
+   - 后续源全部跳过 WebFetch，直接使用 API 聚合源兜底
+   - 日报中标注「WebFetch 全局不可用，部分源缺失」
+
+#### B. Harness Stop Hook 进程清理（方案 A + B 结合）
+
+**方案 A：脚本清理（快速见效，已采纳）**
+
+在 Harness 的 Stop hook 配置中增加清理脚本：
+
+```bash
+#!/bin/bash
+# 杀掉所有 MCP 相关僵尸进程（在 stop hook 触发时执行）
+MCP_PIDS=$(ps aux | grep -E '(mcp|browser-use|playwright)' | grep -v grep | awk '{print $2}')
+for pid in $MCP_PIDS; do
+    timeout 5 kill -TERM $pid || kill -9 $pid 2>/dev/null
+done
+```
+
+- 放置于 `~/.claude/hooks/stop-cleanup.sh`
+- 在 Harness 配置中引用：`stop_hooks: ["bash ~/.claude/hooks/stop-cleanup.sh"]`
+
+**方案 B：MCP 配置进程管理（根治，预留升级路径）**
+
+在 `mcp.json` 中为每个 MCP server 增加进程生命周期配置：
+
+```json
+{
+  "mcpServers": {
+    "browser-use": {
+      "command": "npx",
+      "args": ["@anthropic/mcp-browser-use"],
+      "processManagement": {
+        "idleTimeout": 300,
+        "terminationSignal": "SIGTERM",
+        "autoRestart": false
+      }
+    }
+  }
+}
+```
+
+> **用户决策**：方案 A 和 B 一起做——A 立即生效止损，B 从源头根治。当前 Phase 1 实施 A，Phase 2 在 MCP 配置升级时实施 B。
 
 ### How to Verify
-- **File integrity:** `git status` shows only the expected files.  
-- **Workflow continuity:** The daily news workflow’s trigger command still executes the updated pipeline without errors (dry‑run or minimal run).  
-- **Unrelated skills untouched:** Open a random unrelated skill file (e.g., `claude‑for‑legal‑zh`) and confirm no edits by timestamp or diff.
+
+**WebFetch 降级验证**：
+- 运行日报生成时观察日志，arXiv 源应显示 `skipWebFetchPreflight: true`
+- 若 arXiv 仍失败，日报中 arXiv 段应有不可用标注
+- 全局拦截时不应有连续 5+ 个 WebFetch 超时日志
+
+**Stop hook 验证**：
+- 会话结束后 `ps aux | grep mcp` 应无残留进程
+- stop hook 执行时间应 < 10 秒（原来 > 30 秒）
+- 下次会话启动时无端口占用冲突
 
 ## 异常处理
 
 ### Edge Cases
-- **Ambiguous refiner name:** User says “更新 refiner” without context. → Ask for explicit path; default to **daily news workflow** only if the conversation was exclusively about the news workflow.  
-- **Rollback after multiple changes:** The P₂ component was recently changed together with others. → Use `git log` to isolate the correct commit range and `git revert` with `--no-commit` on the overall merge, then manually stage only the intended files.  
-- **User pasted a large block of content (Pasted text #1 +15 lines) to replace part of the refiner:** → Parse exactly which section the user means; if it’s ambiguous, ask to highlight the target section in the refiner file. After insertion, verify no unintended line breaks or syntax corruption.
+- **部分源可抓、部分不可抓**：按源单独标记，不全局降级
+- **skipWebFetchPreflight 也失败**：直接跳过该源，不启用 browser-use（成本太高）
+- **stop hook 清理脚本本身卡死**：外层加 `timeout 15` 保护
 
 ### Fallback
-- If git history is unclear, create a backup of the current refiner file before changes. After update, do a manual diff to ensure the legal‑zh refiner and other unrelated files are unchanged.
-- If the mistake already happened (e.g., legal‑zh refiner was wrongly updated), immediately revert that file’s changes and re‑apply only to the daily news refiner.
+- WebFetch 全局不可用时：日报仅包含 World News API 聚合源，标注「精简版」
+- arXiv 不可用时：跳过论文解读段，8 段日报变为 7 段
+- 僵尸进程清理失败：下次会话启动时在 init hook 中追加二次清理
 
 ## Updated Guidance
-Explicit correction detected — user corrected assistant output:  
-> “P₂ 单独回滚到上个版本 这里错了，我不需要更新 claude for legal-zh 里面的refiner，更新错了，我的原本需求的 [Pasted text #1 +15 lines]”
 
-This skill codifies that **refiner modifications must be scoped to the exact workflow intended**, and that a generic “refiner” request in a news‑workflow context must not spill over into unrelated skills’ configuration files. Always verify the target file path and, when rolling back, isolate the rollback to the specific component (P₂) of the news workflow.
+**用户明确纠正**：
+1. arXiv WebFetch 每次都失败 → 不要继续用默认方式调 WebFetch，优先 skipWebFetchPreflight
+2. 如果 WebFetch 全部被拦截 → 后续源都不再调用 WebFetch，避免浪费时间
+3. Stop hooks 长时间运行不是正常现象 → 需要主动清理 MCP 僵尸进程
+4. 方案 A（脚本清理）和方案 B（MCP 进程管理）不是二选一 → 两者一起做，A 先落地、B 预留升级路径
 ```
