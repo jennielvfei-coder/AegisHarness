@@ -1,13 +1,17 @@
 harness:
-  transcript_dir: "D:\\Claude"
-  transcript_file: "memory.jsonl"
+  transcript_dir: "D:\\Claude\\harness"
+  transcript_file: "latest_session.jsonl"
+  mcp_bridge: true
   db_path: "D:\\Claude\\harness\\state.db"
   # Phase 2: Use MCP memory session_summary entities as primary signal source.
   # Current memory.jsonl stores knowledge-graph relations — low signal.
   # MCP session summaries contain ❓Request/💡Learned/✅Completed — ideal for skill extraction.
 
 observer:
-  min_tool_calls_for_skill: 3
+  # MCP session summaries contain 2-4 entries per session (significantly less than raw transcripts).
+  # Lower thresholds accordingly — quality over quantity for MCP data.
+  min_tool_calls_for_skill: 1
+  min_content_length_for_skill: 500
   skip_trivial_sessions: false
   patterns:
     correction:

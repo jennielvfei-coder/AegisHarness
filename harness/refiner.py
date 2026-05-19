@@ -140,7 +140,7 @@ def _call_llm(prompt: str, base_url: str, token: str, model: str = "deepseek-v4-
 
     payload = {
         "model": model,
-        "max_tokens": 2000,
+        "max_tokens": 4000,
         "temperature": 0.3,
         "messages": [
             {"role": "user", "content": prompt}
@@ -156,11 +156,17 @@ def _call_llm(prompt: str, base_url: str, token: str, model: str = "deepseek-v4-
         )
         resp.raise_for_status()
         data = resp.json()
-        # Anthropic format: content[0].text
+        # Anthropic format: content is an array, find text blocks
         if "content" in data and isinstance(data["content"], list):
-            return data["content"][0].get("text", "")
+            text_blocks = [
+                item.get("text", "")
+                for item in data["content"]
+                if item.get("type") == "text" and item.get("text")
+            ]
+            if text_blocks:
+                return "\n".join(text_blocks)
         # OpenAI-compatible format: choices[0].message.content
-        elif "choices" in data:
+        if "choices" in data:
             return data["choices"][0]["message"]["content"]
         return str(data)
     except Exception as e:
