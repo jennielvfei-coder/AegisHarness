@@ -39,7 +39,7 @@ refiner:
   model: "deepseek-v4-pro"
 
 injector:
-  enabled: false
+  enabled: true
   max_fragments: 3
   min_confidence: 0.6
 
