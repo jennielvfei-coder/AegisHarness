@@ -153,10 +153,13 @@ def _store_fragments(fragments: list[dict]):
         conn = sqlite3.connect(str(harness_dir / "state.db"), timeout=2)
         for f in fragments:
             conn.execute(
-                """INSERT INTO fragments(tag, trigger_phrases, content, confidence, created_at)
-                   VALUES(?,?,?,?,unixepoch())""",
+                """INSERT INTO fragments(tag, trigger_phrases, content, confidence,
+                   fragment_type, skill_name, created_at)
+                   VALUES(?,?,?,?,?,?,unixepoch())""",
                 (f.get("tag", "general"), json.dumps(f.get("tag", "")),
-                 f.get("content", "")[:2000], 0.7),
+                 f.get("content", "")[:2000], 0.7,
+                 f.get("fragment_type", "knowledge"),
+                 f.get("skill_name", None)),
             )
         conn.commit()
         conn.close()

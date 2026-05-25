@@ -1,74 +1,73 @@
-# Skill Analysis
-
-Let me classify this session:
-
-- **SKILL_TYPE**: `task-workflow` — This is a concrete, repeatable diagnostic workflow for checking memory system health across two layers (local files + MCP knowledge graph).
-- **QUALITY_SCORE**: `0.75` — The diagnostic procedure is concrete, steps are reproducible, but some variation exists depending on what memory backends are active.
-- **ACTION**: `create` — None of the existing skills cover memory system diagnostics. The existing skills (`ai-governance`, `data-compliance`, `news-workflow`, `privacy`) are all mental-model types covering domain knowledge, not system health checks.
-
----
-
 ```markdown
 ---
-name: memory-system-health-check
-description: 诊断双层记忆系统（本地MEMORY.md + MCP知识图谱）的可用性和数据完整性
-tags: [system-diagnostics, memory, workflow]
+name: harness-self-audit
+description: 对 AI governance 系统做全状态审计，识别文档-实现鸿沟、方案内部矛盾、和隐性依赖
+tags: [data-compliance, ai-governance, news-workflow]
 triggers:
-  - 用户问"记忆功能可用吗"
-  - 用户问"检查记忆数据"
-  - 用户问"记忆系统状态"
-  - Claude 主动建议（会话开始时确认记忆上下文加载正常）
+  - "harness 还需要什么"
+  - "评估 harness 当前状态"
+  - "审查 governance 体系"
+  - "系统有哪些缺口"
 version: 1
-harness_confidence: 0.6
+harness_confidence: 0.85
 ---
 
-# 记忆系统健康检查
+# Harness 自审计审计
 
 ## 执行逻辑
 
 ### When to Use
-- 用户直接询问记忆系统状态
-- 会话开始需要确认记忆上下文是否完整加载
-- 发现记忆读取异常时需要排查
-- 定期维护检查（用户未要求但 Claude 发现记忆可能过期时）
+当需要对 AI governance/harness 系统进行整体状态评估——不是修某个 bug，而是退一步看清：现有记忆的主题分布、文档和代码之间的鸿沟、被忽略的隐性依赖。
 
 ### Step-by-Step
 
-#### Phase 1: 本地文件记忆层检查
-1. **读取索引文件** — `Read(MEMORY.md)`，确认索引条目数量和最后更新时间
-2. **列出所有记忆文件** — `Bash/Get-ChildItem memory/` 获取文件名、大小、最后修改时间
-3. **抽查1-2个记忆文件** — 验证文件内容完整、frontmatter 齐全、无损坏
+**第一步：全状态读取**
+必须并行读取三类数据源：
+- **记忆文件**（memory/*.md）——已沉淀的知识
+- **Harness 代码**（injector / observer / daemon）——实际运行的逻辑
+- **配置文件**（yaml / 数据库 schema）——声明式状态
+- **最近提交历史**——演进轨迹
 
-#### Phase 2: MCP 知识图谱层检查
-4. **搜索关键词探测** — `mcp__memory__search_nodes(query="memory")` 或类似查询，获取实体/关系基数
-5. **如有必要，读取最近图谱快照** — 确认会话摘要的覆盖时间范围
-6. **交叉验证** — 对比本地文件和知识图谱中是否有互相引用的内容
+**第二步：主题聚类**
+将记忆/配置/代码按主题分桶，识别：
+- 哪些属于环境修复（一次性修复，不会再犯）
+- 哪些属于架构需求（反复出现的模式）
+- 哪些属于工作流需求（特定任务的自动化）
 
-#### Phase 3: 结论输出
-7. **生成两层状态摘要表**：
-   - Layer 1 本地文件：文件数、最后更新时间、数据新鲜度评估
-   - Layer 2 MCP图谱：实体数、关系数、覆盖时间范围
-8. **标注风险**：数据过期（>7天未更新）、层间不一致、文件损坏
-9. **给出可用性结论**：✅ 正常 / ⚠️ 部分异常 / ❌ 不可用
+这一步输出**记忆地图**而非列表。
+
+**第三步：识别三类鸿沟**
+
+| 鸿沟类型 | 检测方式 | 例子 |
+|----------|----------|------|
+| 文档-实现鸿沟 | config/schema 中有定义，但代码中无对应执行路径 | `preflight_check` fragment type 建了列，但没有代码执行它 |
+| 能力-守护鸿沟 | 修复已落地，但没有机制阻止复发 | 绕过了 `mcp_wrapper.py`，但没有检查来防止下次构建时重新引入 |
+| 显性-隐性鸿沟 | 方案中直接写的依赖，但在优先级排序中被忽略 | P0 preflight 最有价值的检查依赖 P2 跨 session 数据 |
+
+**第四步：检查方案自相矛盾**
+在提出改进建议前，先审视每个方案：
+- 是否在解决 A 的同时加重了 B？（例如：解决 context 膨胀的方案是注入更多 context）
+- 是否方案 X 和方案 Y 在抢同一个资源？
+- 是否 P0 实际依赖 P2 才能生效？
+
+**第五步：输出缺口优先级**
+按依赖关系排序，而非按严重程度排序：
+1. 阻塞性依赖（P0 依赖的 P2 先做）
+2. 独立可交付的修复
+3. 架构重构（最晚，因为需要更多上下文稳定）
 
 ### How to Verify
-- 本地文件数量和索引条目数一致
-- 记忆文件最后修改时间不超过14天（否则提示"可能过时"）
-- MCP 知识图谱返回正常响应（无超时/空结果异常）
-- 两层之间存在交叉引用的内容（证明同步正常）
+- 每个识别出的鸿沟都能指出具体文件和行号（或配置键）
+- 每个方案矛盾都能用一句话描述冲突
+- 优先级排序包含依赖链解释
 
 ## 异常处理
 
 ### Edge Cases
-- **索引与文件不匹配**：MEMORY.md 列出3条但文件只有2个 → 报告缺失文件，建议清理索引
-- **MCP 服务不可用**：若 `search_nodes` 超时或报错，明确告知"知识图谱层不可用，本地文件层正常"
-- **全部为空**：两层均无数据 → 告知用户"记忆系统尚未建立，是否为首次使用？"
-- **数据量过大**：MCP 返回上千实体时，只读取摘要而不全量展开，用搜索关键词探测内容结构
+- **记忆过少**（<5条）：缺乏聚类价值，转而检查"为什么记忆没沉淀"——可能是 observer 信号路由问题
+- **代码和记忆完全一致**：无鸿沟，转而检查"是否过度拟合已知问题，忽略了新出现的模式"
+- **方案无矛盾**：可能是分析不够深入，再问"这个方案假设什么前提条件？这些条件都满足吗？"
 
 ### Fallback
-- 若 MCP 不可用，仅基于本地文件给出部分诊断结论，明确标注"仅检查了本地层"
-- 若本地文件目录不存在，引导用户确认 `memory/` 路径是否正确配置
-
-## Evolution Log
-- 2026-05-19 v1: 从会话 session_20260519152047 提取，覆盖双层记忆系统（本地文件 + MCP知识图谱）的完整诊断流程
+如果无法完成全状态读取（文件缺失、权限问题），至少输出"已知未知"清单——标记哪些数据源没读到，以及这对审计结论可靠性的影响。
 ```

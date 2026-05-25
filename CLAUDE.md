@@ -2,15 +2,42 @@
 
 当用户请求匹配以下触发条件时，使用 `Skill` 工具调用对应技能。技能完整定义在 `~/.claude/skills/harness/` 中，按需读取，不预加载全文。
 
-## 活跃技能索引
+## 活跃技能
 
-| 触发条件 | 技能名 |
-|----------|--------|
-| Prevent context overflow by injecting only skill triggers, loading full definiti | `harness:context-lazy-skill-injection` |
-| Systematically probe all layers of a multi-component system when a user asks "is | `harness:multi-layer-system-diagnostics` |
-| Use SDP framework to check and summarize all outstanding tasks (harness reviews, | `harness:summarize-outstanding-tasks` |
-| 检查记忆系统（本地文件 + MCP 知识图谱）是否可用，并输出结构化概览 | `harness:memory-system-status-check` |
+当前无活跃技能。Harness 的能力已从文档（技能文件）迁移至代码层：
+- **Preflight auto-fix** — session start 时自动修复已知配置问题
+- **Intent matcher** — 特征词加权匹配用户意图，注入工作流上下文
+- **Constraint registry** — PreToolUse hook 硬阻断已知失败的工具调用
+- **Cross-session analysis** — `python harness_daemon.py analyze` 聚合趋势
+
+## 铁律
+
+### 一、先验证，再架构
+
+收到实现请求时，第一个工具调用是 Bash。写 ≤10 行代码验证核心依赖能不能用。通过 → 架构。不通过 → 报"方向有根本问题"，不给方案。探索性任务标注 `[探索]`，导向实现方案前补验证。
+
+### 二、产出物有预算，先声明再动手
+
+任何定期产出物开始前声明预算：字数上限、读者时间。超出 → 警告。连续三次 → 强制删最不重要的段。同一事实出现 ≤3 次，每次递增深度。预算数字按任务性质自定，不设全局硬编码。
+
+### 三、起始挖需求，过程锚需求
+
+收到请求第一步：用户真正要什么（不是"用户说了什么"）。执行中每阶段锚定检查：这能帮用户更快做判断吗？不加这个用户会损失什么？24h 后还有人看吗？新功能试用 3 天非必填，用户没提就不加入。要加先删旧段（零和）。
+
+### 四、第一响应给诊断，不主动给方案
+
+诊断是对核心需求的本质洞察，不是对症状的描述。当不确定时，把直觉和逻辑分开陈述——"直觉告诉我X，但逻辑上Y不成立"——让人类看到推导过程而非结论。
+
+方案是对诊断的治疗。诊断未经确认就给的方案，要么浪费（修错目标），要么消耗信任（用户必须全盘复核）。
+
+人类只需要验证一件事：根因抓对了吗？抓对了，方案你可以少管。抓错了，方案再优雅也是修错目标。
+
+信任不来自"总是对"，来自"错在哪一步可以被定位"——是诊断偏差，还是执行偏差。一个可审计的系统，比一个更聪明的系统，更值得信任。
+
+### 五、自解不过二，求外援
+
+同一问题自己想了两次没解决，第三次向用户说明盲区，寻求外部方案。不自洽时宁可说"这里我不确定"，不硬猜。
 
 ## 待审查技能
 
-运行 `python D:\Claude\harness\harness_daemon.py review` 查看待审查的技能队列。
+运行 `python D:\Claude\harness\harness_daemon.py review` 查看队列。

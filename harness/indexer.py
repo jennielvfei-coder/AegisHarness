@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS observations (
     summary TEXT,
     tags TEXT,
     skill_name TEXT,
+    decision_trajectory TEXT,
     processed_at REAL NOT NULL,
     created_at REAL NOT NULL DEFAULT (unixepoch())
 );
@@ -622,6 +623,9 @@ CREATE TABLE IF NOT EXISTS meta_store (
     updated_at REAL NOT NULL DEFAULT (unixepoch())
 );
 """,
+    8: """
+ALTER TABLE observations ADD COLUMN decision_trajectory TEXT;
+""",
 }
 
 
@@ -683,8 +687,9 @@ class HarnessDB:
         with self._lock:
             cur = self._conn.execute(
                 """INSERT INTO observations
-                   (session_id, action, confidence, reason, summary, tags, skill_name, processed_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, unixepoch())""",
+                   (session_id, action, confidence, reason, summary, tags, skill_name,
+                    decision_trajectory, processed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, unixepoch())""",
                 (
                     report.session_id,
                     report.action,
@@ -693,6 +698,8 @@ class HarnessDB:
                     report.summary,
                     json.dumps(report.tags, ensure_ascii=False),
                     report.skill_name,
+                    json.dumps(report.decision_trajectory, ensure_ascii=False)
+                    if report.decision_trajectory else None,
                 ),
             )
             self._conn.commit()

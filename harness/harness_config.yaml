@@ -5,8 +5,8 @@ harness:
   db_path: "D:\\Claude\\harness\\state.db"
 
 observer:
-  min_tool_calls_for_skill: 3
-  min_content_length_for_skill: 1200
+  min_tool_calls_for_skill: 8
+  min_content_length_for_skill: 3000
   patterns:
     correction:
       - "不对"
@@ -35,6 +35,10 @@ injector:
   enabled: true
   max_fragments: 3
   min_confidence: 0.6
+  max_failure_patterns: 5
+  max_total_lines: 40
+  preflight_enabled: true
+  preflight_max_lines: 5
 
 vector_db:
   enabled: false
@@ -42,10 +46,40 @@ vector_db:
   model: "all-MiniLM-L6-v2"
 
 mcp_wrapper:
-  enabled: true
+  enabled: false
   wrapper_path: "D:\\Claude\\harness\\mcp_wrapper.py"
   pid_dir: "D:\\Claude\\harness\\.wrapper_pids"
 
 evolution:
   auto_activate: false
   require_review: true
+
+mind_theory:
+  enabled: true
+  embedding_model: "all-MiniLM-L6-v2"
+  cosine_gate:
+    threshold: 0.4
+    injection_max_lines: 5
+  attention:
+    initial_alphas:
+      user_msg: 0.20
+      claude_behavior: 0.20
+      session_tags: 0.20
+      history_summary: 0.20
+      memory_entries: 0.20
+    learning_rate_initial: 0.01
+    learning_rate_decay: 0.001
+    decay_sessions: 50
+    archive_threshold: 0.05
+    archive_consecutive_sessions: 10
+  session_quality:
+    w_context_used: 0.15
+    w_user_correction: 0.55
+    w_session_completed: 0.15
+    w_domain_hit_rate: 0.15
+  omega:
+    rule_first: true
+    classifier_min_examples: 10
+  psi:
+    k_neighbors: 5
+    max_interaction_pairs: 1000

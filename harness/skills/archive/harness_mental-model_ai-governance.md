@@ -1,51 +1,68 @@
+```
+```
 ```markdown
 ---
-name: task-context-isolation-before-mutation
-description: 修改文件前必须校验当前工作上下文与目标项目一致，禁止跨项目污染（如将 news-workflow 的更新误写入 legal-zh）
-tags: [ai-governance, data-compliance, news-workflow]
+name: harness-gap-contradiction-analysis
+description: Introspect an AI governance harness to identify knowledge‑action gaps, detect self‑contradictions in improvement plans, and prioritise fixes.
+tags: [ai-governance, privacy, news-workflow, data-compliance, contract-review]
 triggers:
-  - 涉及多项目/多 repo 交叉操作时的任何文件写入、重构或配置更新
-  - 用户要求"回滚"、"撤销"某次错误写入时
-version: 2
-harness_confidence: 0.54
+  - "harness还有什么需要补足提升的地方"
+  - "分析当前系统的缺陷"
+  - "审查架构并提出改进优先顺序"
+  - "这个方案自相矛盾吗"
+version: 1
+harness_confidence: 0.82
 ---
 
-# 任务上下文隔离 — 写入前校验
+# Harness Gap & Contradiction Analysis
 
 ## 执行逻辑
 
 ### When to Use
-用户会话横跨多个项目/子模块（如 news-workflow、legal-zh、Harness 本体）时，**任何写操作前**强制执行本校验。尤其当助手从上下文缓存中提取路径或推断目标时，极易将 A 项目的修改误写入 B 项目的同名文件（如 `refiner` 配置）。
+- After multiple sessions where the harness under‑performs or forgets lessons.
+- Before implementing new features, to avoid reinforcing latent contradictions.
+- When a proposed improvement plan feels intuitively off but the reason isn’t clear.
 
-### Step-by-Step
-1. **写入前显式锁定目标**：在 `Write` / `Edit` 工具调用前，先在思考链路中输出 3 要素：
-   - 当前会话主项目（从 session tags / 用户首条指令推断）
-   - 目标文件完整路径
-   - 目标文件所属项目
-2. **交叉比对**：若「目标文件所属项目」≠「当前会话主项目」，**必须向用户确认**再写入。不得静默执行。
-3. **回滚锚点**：每次写入前记录操作摘要（文件路径 + 版本/哈希 + 时间戳），供用户要求"P₂ 单独回滚"时快速定位。
-4. **项目边界清单**（从已知会话提取）：
-   - `news-workflow` → 日报、Prophet 信号、Obsidian vault、arXiv 抓取
-   - `legal-zh` → 法律中文 refiner、合规分析
-   - `harness` → Stop Hook、MCP 进程管理、会话生命周期
+### Step‑by‑Step
+
+1. **Load & diff current state**
+   - Read the memory file, configuration, key daemon sources (`harness_daemon.py`, `injector.py`).
+   - Run `git log` summarised recent changes.
+   - Identify what the system “knows” vs what it actually does.
+
+2. **Surface the knowledge‑action chasm**
+   - List features that are documented, seeded, partially built but never completed (e.g., `preflight_check` fragment exists, no executable check).
+   - Flag patterns like “知道但没做” (known failure mode described but not prevented).
+
+3. **Map dependencies & 隐藏成本**
+   - For each proposed fix, ask *“如果这个改动需要先有另一个未实现的能力，顺序是什么？”* (Does P0 truly need P2?)
+   - Quantify context‑bloat risk: will an extra check output 1 line or 10? Aim for **single‑line status indicators** not explanatory paragraphs.
+   - Identify symbiotic pairs (e.g., executable preflight ↔ cross‑session data store).
+
+4. **Detect self‑contradictions in the improvement plan**
+   - Search for paradoxes like “治疗一种病时加重另一种病” (curing one illness while worsening another).
+   - Example: Reducing injector bloat by adding more preflight output – mark as contradiction and re‑design for minimal signal.
+
+5. **Prioritise ruthlessly**
+   - Upgrades that close the knowledge‑action gap and serve as building blocks for other fixes get highest priority.
+   - One‑shot config fixes (`skipWebFetchPreflight`) rank low unless they block other work.
+   - Anything that increases context size is demoted unless no alternative exists.
 
 ### How to Verify
-- 用户说"回滚 P₂"时，能精确定位到**单次写入**而非整个会话的所有修改。
-- 连续 3 次会话未出现"写错项目"的纠正。
+- Every identified gap must be accompanied by a concrete, falsifiable statement (e.g., “preflight check exists as text but is never executed by code”).
+- Each contradiction must be explicitly resolved; if unresolvable now, create a **debt tracker** with a trigger condition.
 
 ## 异常处理
 
 ### Edge Cases
-- 用户**明确要求**跨项目同步（如"把 news-workflow 的这个配置也复制到 legal-zh"）→ 不拦截，但在响应中标注「跨项目写入」标记。
-- 同一会话中有多个活跃项目 → 每次切换项目时重新锁定上下文。
+- **Unfixable contradictions**: e.g., low context budget and high observability need. Mark as “resource‑bound tradeoff” and record the accepted risk.
+- **Dormant failures**: memory entries about errors that haven’t recurred recently – evaluate whether the underlying condition is still present before spending cycles.
 
 ### Fallback
-- 若已发生错误写入（如本会话：news-workflow 的 refiner 更新被误写入 legal-zh），执行**最小回滚**：
-  1. 定位该次写入的单一文件/变更集
-  2. Git 级回滚该文件到上一版本
-  3. 不触及同日其他正确写入
-  4. 重新在当前正确项目下执行原操作
+If the full analysis is too heavy (session context low), use a rapid alternate:
+1. Ask *“为了让这个改进生效，什么必须成立？”*
+2. Check whether that prerequisite exists today.
+3. If not, the improvement is blocked – only then decide to build the prerequisite or postpone.
 
-## Updated Guidance
-用户纠正：助手上次将 P₂（refiner 更新）写入了 `claude for legal-zh`，而非当前的 news-workflow 项目。根本原因是上下文缓存中残留了 legal-zh 的路径引用，助手未经项目归属校验即执行写入。自本版本起，所有写入操作强制执行 Step 1-2 的项目锁定与交叉比对。
+> This skill itself is a **meta‑skill**: apply it whenever you plan significant harness modifications to avoid architecture‑level mistakes.
 ```
