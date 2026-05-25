@@ -699,6 +699,7 @@ def cmd_inject():
 
     _inject_constraints(output, constraints, injector_cfg)
     _inject_skill_health(output, db_path, injector_cfg)
+    _inject_omega_diagnostics(output, db_path)
     _inject_memory_fragments(output, db_path, injector_cfg)
     _inject_failure_patterns(output, db_path, ctx.get("matched", []), injector_cfg)
     _inject_preflight_checks_from_cache(output, preflight_checks)
@@ -747,18 +748,20 @@ def _update_skill_usage(db, skill_names: list[str]):
 
 
 def _evaluate_skill_effectiveness(db, report, session_content: str):
-    """Binary feedback: did failure patterns linked to skills recur in this session?
+    """Binary + positive feedback loop for skill effectiveness.
 
-    For each failure_pattern fragment linked to a skill:
-    - If the error signatures from the pattern appear in this session → skill ineffective
-    - If the session had the relevant tool BUT no failure → skill effective
-    - If the session didn't exercise the relevant tool → no signal (skip)
+    Provenance:
+    - Negative: failure pattern signatures match session content (same as before)
+    - Positive: if constraint_candidates are empty AND session had tool activity,
+      all skills get a small boost (clean-session signal).
+      Connectivity: report.constraint_candidates comes from observer's
+      _detect_recurring_failures → empty candidates = no tool failed 3+ times.
 
-    This is natural selection's basic unit: did the skill prevent what it claimed to prevent?
+    This closes the feedback loop: skills get rewarded when nothing fails,
+    not just punished when failures recur. Prevents "everything decays to zero."
     """
     try:
         session_lower = session_content.lower()
-        session_tags = set(report.tags)
 
         with db._lock:
             cur = db._conn.execute(
@@ -766,6 +769,8 @@ def _evaluate_skill_effectiveness(db, report, session_content: str):
                 "WHERE fragment_type='failure_pattern' AND skill_name IS NOT NULL"
             )
             patterns = cur.fetchall()
+
+        any_failure_recurred = False
 
         for fid, tag, skill_name, content, conf in patterns:
             if not skill_name:
@@ -776,19 +781,17 @@ def _evaluate_skill_effectiveness(db, report, session_content: str):
             sig_words.update(w.lower() for w in content[:200].split()
                            if len(w) > 3 and w.isalpha())
 
-            # Check if the session's failures match this pattern's signatures
             hits = sum(1 for sw in sig_words if sw in session_lower)
             match_ratio = hits / max(len(sig_words), 1)
 
             if match_ratio > 0.3:
-                # Failure pattern recurred — skill was ineffective
+                any_failure_recurred = True
                 new_conf = max(0.2, (conf or 0.5) - 0.1)
                 with db._lock:
                     db._conn.execute(
                         "UPDATE fragments SET confidence=?, updated_at=unixepoch() WHERE id=?",
                         (new_conf, fid),
                     )
-                    # Update skill_index confidence too
                     db._conn.execute(
                         "UPDATE skill_index SET harness_confidence=MAX(0.2, harness_confidence-0.05) "
                         "WHERE name LIKE ?",
@@ -797,6 +800,28 @@ def _evaluate_skill_effectiveness(db, report, session_content: str):
                     db._conn.commit()
                 print(f"[harness] Skill ineffective: {skill_name} — "
                       f"'{tag}' recurred (conf {conf:.2f}→{new_conf:.2f})")
+
+        # ── Positive feedback: if no failure patterns recurred, skills were effective ──
+        if not any_failure_recurred:
+            for fid, tag, skill_name, content, conf in patterns:
+                if not skill_name:
+                    continue
+                boost = 0.02
+                new_conf = min(0.95, (conf or 0.5) + boost)
+                with db._lock:
+                    db._conn.execute(
+                        "UPDATE fragments SET confidence=?, updated_at=unixepoch() WHERE id=?",
+                        (new_conf, fid),
+                    )
+                    db._conn.execute(
+                        "UPDATE skill_index SET harness_confidence="
+                        "MIN(0.95, harness_confidence+0.01) "
+                        "WHERE name LIKE ?",
+                        (f"%{skill_name}%",),
+                    )
+                    db._conn.commit()
+            print(f"[harness] Skills boosted: no failure patterns recurred "
+                  f"({len(patterns)} patterns)")
     except Exception:
         pass
 
@@ -963,6 +988,45 @@ def _inject_skill_health(output: InjectorOutput, db_path: Path, injector_cfg: di
                 lines.append(f"- `{name}` — {age:.0f} 天未使用")
         if lines:
             output.add(0.65, "## 💤 技能状态", lines)
+    except Exception:
+        pass
+
+
+def _inject_omega_diagnostics(output: InjectorOutput, db_path: Path):
+    """Read Omega diagnostic fragments and inject them for the next session.
+
+    Connectivity: Omega classify_failure → context_injection →
+    classify_beliefs → BeliefTrace.context_injection → fragments table
+    (fragment_type='omega_diagnostic') → this function reads it.
+
+    Priority: 0.70 (above skill health at 0.65; below constraints at 0.80).
+    Only fresh diagnostics (< 7 days) are injected.
+    """
+    try:
+        from indexer import HarnessDB
+        db = HarnessDB(db_path)
+        with db._lock:
+            cur = db._conn.execute(
+                "SELECT tag, content, source_session, confidence, created_at "
+                "FROM fragments WHERE fragment_type='omega_diagnostic' "
+                "AND created_at > unixepoch() - 604800 "  # 7 days
+                "ORDER BY created_at DESC LIMIT 3"
+            )
+            rows = cur.fetchall()
+        db.close()
+
+        if not rows:
+            return
+
+        lines = []
+        for tag, content, source_session, conf, created_at in rows:
+            ts = datetime.fromtimestamp(created_at).strftime("%m-%d %H:%M")
+            modality = tag.replace("omega-", "").replace("_failure", "")
+            lines.append(f"**[Omega] {modality} 层诊断** ({ts}, conf={conf:.0%}):")
+            lines.append(content[:300])
+
+        if lines:
+            output.add(0.70, "## 🧠 Omega 诊断注入", lines)
     except Exception:
         pass
 
@@ -1192,6 +1256,23 @@ def _run_mind_pipeline(
             trace.evidence, trace.recommended_action,
             getattr(trace, "escalation_blocked_reason", "") or "",
         )
+        # ── Save Omega diagnostic context for next-session injection ──
+        # Connectivity: context_injection → fragments table → injector reads it
+        ctx_inj = getattr(trace, 'context_injection', '')
+        if ctx_inj and trace.belief_type in ("semantic_failure", "knowledge_failure"):
+            try:
+                with db._lock:
+                    db._conn.execute(
+                        "INSERT INTO fragments(tag, trigger_phrases, content, "
+                        "source_session, confidence, fragment_type, created_at) "
+                        "VALUES(?,?,?,?,?,?,unixepoch())",
+                        (f"omega-{trace.belief_type}", "",
+                         ctx_inj[:2000], session_id, trace.confidence,
+                         "omega_diagnostic"),
+                    )
+                    db._conn.commit()
+            except Exception:
+                pass
 
     # Seed constraints from false beliefs (multi-hypothesis aware: skips ambiguous)
     false_beliefs, blocked_escalations = get_false_beliefs_for_constraints(belief_traces)
@@ -1278,7 +1359,10 @@ def _run_mind_pipeline(
     embeddings = compute_source_embeddings(session_data, db)
 
     # ── Attention Fuser ──
-    from attention_fuser import fuse, update_weights, get_learning_rate, check_early_warning
+    from attention_fuser import (fuse, update_weights, get_learning_rate,
+                                  check_early_warning, detect_collinearity,
+                                  compute_per_source_quality,
+                                  USER_CONSTANT_SOURCES, ENVIRONMENT_SOURCES)
     from cosine_gate import get_default_alphas
 
     # Get alphas from previous session (or config defaults)
@@ -1302,9 +1386,30 @@ def _run_mind_pipeline(
         config_path=config_path,
     )
 
+    # ── Per-source quality (breaks collinearity in single-user systems) ──
+    # Provenance: count Read tool calls targeting memory directory from entries list
+    memory_read_count = 0
+    for entry in entries:
+        if entry.get("type") == "tool_use" and entry.get("name") == "Read":
+            file_path = entry.get("input", {}).get("file_path", "")
+            if "memory" in file_path.lower() and ".claude" in file_path.lower():
+                memory_read_count += 1
+
+    per_source_q = compute_per_source_quality(
+        quality,
+        has_user_correction=has_correction,
+        memory_read_count=memory_read_count,
+    )
+
+    # ── Collinearity detection ──
+    collinearity_window = getattr(cmd_inject, '_collinearity_window', [])
+    is_collinear, collinearity_msg = detect_collinearity(alphas, collinearity_window)
+    cmd_inject._collinearity_window = collinearity_window
+    if collinearity_msg:
+        print(collinearity_msg)
+
     # ── Weight Update ──
     attn_cfg = mind_cfg.get("attention", {})
-    # Count sessions for LR decay
     try:
         cur = db._conn.execute("SELECT COUNT(*) FROM fusion_sessions")
         session_count = cur.fetchone()[0]
@@ -1324,15 +1429,17 @@ def _run_mind_pipeline(
         prev_attn = prev["attention_distribution"]
         archive_threshold = attn_cfg.get("archive_threshold", 0.05)
         for key in alphas:
-            # Check if this was already being tracked
-            consecutive_below[key] = 0  # Reset if not found
+            consecutive_below[key] = 0
             if prev_attn.get(key, 0) < archive_threshold:
-                consecutive_below[key] = 1  # Start counting
+                consecutive_below[key] = 1
 
     new_alphas, below_counters = update_weights(
         alphas, quality, attention_dist, lr, consecutive_below,
         archive_threshold=attn_cfg.get("archive_threshold", 0.05),
         archive_sessions=attn_cfg.get("archive_consecutive_sessions", 10),
+        per_source_quality=per_source_q,
+        no_archive_sources=USER_CONSTANT_SOURCES,
+        is_collinear=is_collinear,
     )
 
     # ── Compute continuity score ──
@@ -1361,6 +1468,7 @@ def _run_mind_pipeline(
         below_counters,
         archive_sessions=attn_cfg.get("archive_consecutive_sessions", 10),
         warn_at=5,
+        no_archive_sources=USER_CONSTANT_SOURCES,
     )
     for w in archive_warnings:
         print(f"[harness] mind: {w}")
@@ -1369,17 +1477,24 @@ def _run_mind_pipeline(
 def _seed_false_belief_constraint(db, belief_trace, session_id: str):
     """Create a constraint from a confirmed false belief.
 
-    Only for tool_accessibility and constraint_knowledge types.
+    Only handles operation failures and legacy types — these block specific tools.
+    Semantic and knowledge failures are handled via omega_diagnostic fragments
+    (saved in the belief_trace loop above), not via tool constraints.
     """
-    if belief_trace.belief_type not in ("tool_accessibility", "constraint_knowledge"):
+    bt = belief_trace.belief_type
+
+    # Only operation-failure types get tool constraints
+    if bt not in ("tool_accessibility", "constraint_knowledge", "operation_failure"):
         return
 
-    if not belief_trace.match_pattern or not belief_trace.tool_name:
+    if not getattr(belief_trace, 'match_pattern', '') or not getattr(belief_trace, 'tool_name', ''):
         return
 
     try:
-        constraint_name = f"auto: {belief_trace.belief_type} → {belief_trace.match_pattern[:60]}"
-        message = f"历史会话中 {belief_trace.tool_name}({belief_trace.match_pattern[:80]}) 失败。禁止重复调用。"
+        match_pattern = belief_trace.match_pattern
+        tool_name = belief_trace.tool_name
+        constraint_name = f"auto: {bt} → {match_pattern[:60]}"
+        message = f"历史会话中 {tool_name}({match_pattern[:80]}) 失败。禁止重复调用。"
 
         with db._lock:
             db._conn.execute(
@@ -1387,8 +1502,8 @@ def _seed_false_belief_constraint(db, belief_trace, session_id: str):
                    (name, tool_name, match_pattern, action, message,
                     source_session, expires_at)
                    VALUES (?, ?, ?, 'block', ?, ?, unixepoch() + 21600)""",
-                (constraint_name, belief_trace.tool_name,
-                 belief_trace.match_pattern, message, session_id),
+                (constraint_name, tool_name,
+                 match_pattern, message, session_id),
             )
             db._conn.commit()
     except Exception:
