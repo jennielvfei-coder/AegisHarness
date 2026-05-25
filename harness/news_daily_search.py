@@ -13,7 +13,7 @@ import json
 import re
 import subprocess
 import sys
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
@@ -54,7 +54,8 @@ def _load_queries(date_str: str) -> dict:
     if CACHE_PATH.exists():
         try:
             cache = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[news_daily_search] WARNING: cache file corrupt ({e}), falling back to defaults")
             cache = None
         if isinstance(cache, dict) and cache.get("date") == date_str:
             return cache.get("queries", {})
@@ -108,7 +109,7 @@ def _run_batch_search(queries: list[dict]) -> list[list[dict]]:
             sys.executable, str(CLI_PATH), "batch_search",
             "--queries", queries_json,
         ],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, encoding="utf-8", timeout=60,
         cwd=str(SKILL_DIR),
     )
 
@@ -185,6 +186,8 @@ def main(date_str: str | None = None, queries_file: str | None = None):
         date_str: YYYY-MM-DD, defaults to today
         queries_file: Optional path to custom queries.json
     """
+    import sys as _sys
+    _sys.path.insert(0, str(HARNESS_DIR))
     from indexer import HarnessDB
     from anysearch_ingest import ingest, AnysearchResult
 
@@ -236,10 +239,9 @@ def main(date_str: str | None = None, queries_file: str | None = None):
 
 
 if __name__ == "__main__":
-    date_arg = sys.argv[2] if len(sys.argv) > 2 and sys.argv[1] == "--date" else None
-    queries_arg = None
-    if len(sys.argv) > 2 and sys.argv[1] == "--queries-file":
-        queries_arg = sys.argv[2]
-    elif len(sys.argv) > 4 and sys.argv[3] == "--queries-file":
-        queries_arg = sys.argv[4]
-    main(date_str=date_arg, queries_file=queries_arg)
+    import argparse
+    parser = argparse.ArgumentParser(description="Daily anysearch news search")
+    parser.add_argument("--date", help="Date in YYYY-MM-DD format")
+    parser.add_argument("--queries-file", help="Path to custom queries JSON file")
+    args = parser.parse_args()
+    main(date_str=args.date, queries_file=args.queries_file)
