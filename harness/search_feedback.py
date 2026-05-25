@@ -79,7 +79,7 @@ LIVELIHOOD_TOPICS = [
     ]),
 ]
 
-POLICY_QUERY = "AI 政策 科技监管 数据法律 知识产权 数字经济"
+POLICY_QUERY = "AI 政策 科技监管 数据法律 知识产权 数字经济 智算 安全办公 国产替代"
 
 # Topic group → query text mappings (first element = English search query)
 TOPIC_QUERIES: dict[str, str] = {}
@@ -201,7 +201,7 @@ def _update_weights(db, topic_scores: Counter, today: str):
 
 
 def _select_next_queries(db, today: str) -> dict:
-    """Select top-N academic topics and top livelihood topic for next search."""
+    """Select top-N academic topics for next search. Livelihood is unified query (no rotation)."""
     # Academic: pick top topics by weight
     acad_names = [name for name, _ in ACADEMIC_TOPICS]
     placeholders = ",".join("?" * len(acad_names))
@@ -226,18 +226,11 @@ def _select_next_queries(db, today: str) -> dict:
         if query_text and query_text not in selected_academic:
             selected_academic.append(query_text)
 
-    # Livelihood: pick top 1
-    live_names = [name for name, _ in LIVELIHOOD_TOPICS]
-    placeholders = ",".join("?" * len(live_names))
-    rows = db._conn.execute(
-        f"SELECT topic_name FROM search_topic_weights "
-        f"WHERE topic_name IN ({placeholders}) "
-        f"ORDER BY weight DESC LIMIT 1",
-        live_names,
-    ).fetchall()
-
-    liv_name = rows[0][0] if rows else LIVELIHOOD_TOPICS[0][0]
-    livelihood_query = TOPIC_QUERIES.get(liv_name, LIVELIHOOD_TOPICS[0][1])
+    # Livelihood: unified query every day (all 4 topics in one search, no rotation)
+    livelihood_query = (
+        "就业 招聘 灵活用工 浙江 | 教育 学区 职业教育 双减 浙江 | "
+        "消费 物价 居民收入 零售 浙江 | 基层治理 社区 乡村 县域 浙江"
+    )
 
     # Check for entity drift — new entities in last 7 days
     entity_rows = db._conn.execute(
@@ -293,7 +286,10 @@ def main(date_str: str | None = None):
         queries = {
             "academic": TOPIC_QUERIES.get(ACADEMIC_TOPICS[0][0], ""),
             "policy": POLICY_QUERY,
-            "livelihood": TOPIC_QUERIES.get(LIVELIHOOD_TOPICS[0][0], ""),
+            "livelihood": (
+                "就业 招聘 灵活用工 浙江 | 教育 学区 职业教育 双减 浙江 | "
+                "消费 物价 居民收入 零售 浙江 | 基层治理 社区 乡村 县域 浙江"
+            ),
         }
         _write_next_day_cache(queries, tomorrow)
         return

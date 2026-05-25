@@ -35,14 +35,12 @@ ACADEMIC_TOPICS = [
     "multi-agent coordination, game theory, collective intelligence",
 ]
 
-LIVELIHOOD_TOPICS = {
-    0: "就业 招聘 灵活用工 基层劳动者 浙江",
-    1: "教育 学区 职业教育 双减 高等教育 浙江",
-    2: "消费 物价 居民收入 零售 消费信心 浙江",
-    3: "基层治理 社区 乡村 县域 社会组织 浙江",
-}
+LIVELIHOOD_QUERY = (
+    "就业 招聘 灵活用工 浙江 | 教育 学区 职业教育 双减 浙江 | "
+    "消费 物价 居民收入 零售 浙江 | 基层治理 社区 乡村 县域 浙江"
+)
 
-POLICY_QUERY = "AI 政策 科技监管 数据法律 知识产权 数字经济"
+POLICY_QUERY = "AI 政策 科技监管 数据法律 知识产权 数字经济 智算 安全办公 国产替代"
 
 
 def _get_date(date_str: str | None = None) -> str:
@@ -60,15 +58,14 @@ def _load_queries(date_str: str) -> dict:
         if isinstance(cache, dict) and cache.get("date") == date_str:
             return cache.get("queries", {})
 
-    # Fallback: default rotation based on day-of-year
+    # Fallback: default rotation based on day-of-year (academic only; livelihood is unified)
     doy = date.fromisoformat(date_str).timetuple().tm_yday
     acad_idx = (doy // 2) % len(ACADEMIC_TOPICS)
-    livelihood_idx = doy % 4
 
     return {
         "academic": ACADEMIC_TOPICS[acad_idx],
         "policy": POLICY_QUERY,
-        "livelihood": LIVELIHOOD_TOPICS[livelihood_idx],
+        "livelihood": LIVELIHOOD_QUERY,
     }
 
 
@@ -79,20 +76,20 @@ def _build_batch_queries(queries: dict) -> list[dict]:
             "query": f"{queries['academic']} high-impact",
             "domain": "academic",
             "sub_domain": "academic.search",
-            "max_results": 5,
+            "max_results": 8,
         },
         {
             "query": queries["policy"],
             "content_types": "news",
             "freshness": "day",
-            "max_results": 8,
+            "max_results": 12,
             "zone": "cn",
         },
         {
             "query": queries["livelihood"],
             "content_types": "news",
-            "freshness": "week",
-            "max_results": 8,
+            "freshness": "day",
+            "max_results": 12,
         },
     ]
 
