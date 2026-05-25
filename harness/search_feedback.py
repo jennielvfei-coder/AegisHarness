@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from collections import Counter
 from datetime import date, timedelta
 from pathlib import Path
@@ -27,31 +26,67 @@ OBSIDIAN_NEWS = Path.home() / "Documents" / "Obsidian Vault" / "claude专属文�
 # ── Topic definitions ────────────────────────────────────────────────────────
 
 ACADEMIC_TOPICS = [
-    ("social-ai", "social AI, cooperation, collective behavior, multi-agent social simulation"),
-    ("cognitive-science", "cognitive architectures, reasoning, metacognition, theory of mind"),
-    ("embodied-ai", "embodied AI, robotics, world models, sensorimotor learning"),
-    ("ai-safety", "AI safety, alignment, formal verification, robustness"),
-    ("bci", "BCI, neural signal processing, EEG, brain-computer interface"),
-    ("knowledge-graphs", "knowledge graphs, neuro-symbolic, knowledge representation"),
-    ("causal-inference", "causal inference, mechanistic interpretability, learning theory, generalization"),
-    ("multi-agent", "multi-agent coordination, game theory, collective intelligence"),
+    ("social-ai", [
+        "social AI, cooperation, collective behavior, multi-agent social simulation",
+        "社会AI", "多智能体", "协作", "集体行为", "多Agent", "群体智能",
+    ]),
+    ("cognitive-science", [
+        "cognitive architectures, reasoning, metacognition, theory of mind",
+        "认知架构", "推理", "元认知", "心智理论", "认知科学",
+    ]),
+    ("embodied-ai", [
+        "embodied AI, robotics, world models, sensorimotor learning",
+        "具身智能", "机器人", "世界模型", "具身AI",
+    ]),
+    ("ai-safety", [
+        "AI safety, alignment, formal verification, robustness",
+        "AI安全", "对齐", "形式验证", "鲁棒性",
+    ]),
+    ("bci", [
+        "BCI, neural signal processing, EEG, brain-computer interface",
+        "脑机接口", "神经信号", "BCI",
+    ]),
+    ("knowledge-graphs", [
+        "knowledge graphs, neuro-symbolic, knowledge representation",
+        "知识图谱", "神经符号", "知识表示",
+    ]),
+    ("causal-inference", [
+        "causal inference, mechanistic interpretability, learning theory, generalization",
+        "因果推断", "机制可解释性", "学习理论", "泛化",
+    ]),
+    ("multi-agent", [
+        "multi-agent coordination, game theory, collective intelligence",
+        "多Agent协调", "博弈论", "集体智能",
+    ]),
 ]
 
 LIVELIHOOD_TOPICS = [
-    ("employment", "就业 招聘 灵活用工 基层劳动者 浙江"),
-    ("education", "教育 学区 职业教育 双减 高等教育 浙江"),
-    ("consumption", "消费 物价 居民收入 零售 消费信心 浙江"),
-    ("governance", "基层治理 社区 乡村 县域 社会组织 浙江"),
+    ("employment", [
+        "就业 招聘 灵活用工 基层劳动者 浙江",
+        "就业", "招聘", "灵活用工", "劳动",
+    ]),
+    ("education", [
+        "教育 学区 职业教育 双减 高等教育 浙江",
+        "教育", "学区", "职业教育", "双减",
+    ]),
+    ("consumption", [
+        "消费 物价 居民收入 零售 消费信心 浙江",
+        "消费", "物价", "居民收入", "零售",
+    ]),
+    ("governance", [
+        "基层治理 社区 乡村 县域 社会组织 浙江",
+        "基层治理", "社区", "乡村", "县域",
+    ]),
 ]
 
 POLICY_QUERY = "AI 政策 科技监管 数据法律 知识产权 数字经济"
 
-# Topic group → query text mappings
+# Topic group → query text mappings (first element = English search query)
 TOPIC_QUERIES: dict[str, str] = {}
-for name, query in ACADEMIC_TOPICS:
-    TOPIC_QUERIES[name] = query
-for name, query in LIVELIHOOD_TOPICS:
-    TOPIC_QUERIES[name] = query
+for name, parts in ACADEMIC_TOPICS:
+    TOPIC_QUERIES[name] = parts[0]
+for name, parts in LIVELIHOOD_TOPICS:
+    TOPIC_QUERIES[name] = parts[0]
 
 # ── Scoring ─────────────────────────────────────────────────────────────────
 
@@ -91,35 +126,41 @@ def _context_around(text: str, keyword: str, window: int = 500) -> str:
 def _score_academic_topics(report_text: str) -> Counter:
     """Score each academic topic by presence in today's report."""
     scores = Counter()
-    for name, query in ACADEMIC_TOPICS:
-        keywords = query.split(", ")[:2]
+    for name, parts in ACADEMIC_TOPICS:
+        keywords = parts[1:]  # Chinese match terms (skip the English query string)
         for kw in keywords:
-            if kw.lower() in report_text.lower():
+            if kw in report_text:
                 context = _context_around(report_text, kw)
                 if "重点分析" in context:
                     scores[name] = max(scores[name], PRODUCED_SCORES["重点分析"])
-                elif "总览" in context:
+                elif "总览" in context or "速览" in context:
                     scores[name] = max(scores[name], PRODUCED_SCORES["总览"])
                 else:
-                    scores[name] = max(scores[name], PRODUCED_SCORES["filtered"])
+                    scores[name] = max(scores.get(name, 0), PRODUCED_SCORES["filtered"])
     return scores
 
 
 def _score_livelihood_topics(report_text: str) -> Counter:
     """Score livelihood topics — check 民生观察 section."""
     scores = Counter()
-    liv_match = re.search(r'🏘️ 民生观察.*?(?=## |\Z)', report_text, re.DOTALL)
+    # Try the dedicated livelihood section first, then fall back to full report
+    liv_match = re.search(r'🏘️\s*民生观察.*?(?=## [一二三四五六]|\Z)', report_text, re.DOTALL)
     if not liv_match:
-        return scores
+        # Fallback: scan the overview section for livelihood keywords
+        overview_match = re.search(r'## 一、今日速览.*?(?=## 二|\Z)', report_text, re.DOTALL)
+        target = overview_match.group(0) if overview_match else report_text
+    else:
+        target = liv_match.group(0)
 
-    liv_section = liv_match.group(0)
-    for name, query in LIVELIHOOD_TOPICS:
-        keywords = query.replace(" 浙江", "").split()[:2]
+    for name, parts in LIVELIHOOD_TOPICS:
+        keywords = parts[1:]  # Chinese match terms (skip the English query string)
+        matched = False
         for kw in keywords:
-            if kw in liv_section:
-                scores[name] = PRODUCED_SCORES["民生观察"]
+            if kw and kw in target:
+                scores[name] = max(scores.get(name, 0), PRODUCED_SCORES["民生观察"])
+                matched = True
                 break
-        else:
+        if not matched:
             scores[name] = PRODUCED_SCORES["filtered"]
     return scores
 
@@ -127,22 +168,29 @@ def _score_livelihood_topics(report_text: str) -> Counter:
 def _update_weights(db, topic_scores: Counter, today: str):
     """Update search_topic_weights based on today's production scores."""
     for name, score in topic_scores.items():
+        # Read current state
+        row = db._conn.execute(
+            "SELECT weight, hit_count, miss_streak FROM search_topic_weights WHERE topic_name = ?",
+            (name,),
+        ).fetchone()
+
+        old_weight = row[0] if row else 1.0
+
         if score > 0:
+            # EMA: blend old weight with new signal
+            alpha = 0.3
+            normalized = score / 3.0  # scale 1-3 to 0.33-1.0
+            new_weight = (1 - alpha) * old_weight + alpha * (1.0 + normalized)
             db._conn.execute(
                 """INSERT OR REPLACE INTO search_topic_weights
                    (topic_name, weight, hit_count, miss_streak, last_produced_date, updated_at)
-                   VALUES (?, MAX(0.1, 1.0 + ?), ?, 0, ?, unixepoch())""",
-                (name, score * 0.2, score, today),
+                   VALUES (?, ?, ?, 0, ?, unixepoch())""",
+                (name, new_weight, score, today),
             )
         else:
-            row = db._conn.execute(
-                "SELECT miss_streak, weight FROM search_topic_weights WHERE topic_name = ?",
-                (name,),
-            ).fetchone()
-            streak = (row[0] + 1) if row else 1
-            old_weight = row[1] if row else 1.0
+            streak = (row[2] + 1) if row else 1
             new_weight = old_weight * 0.5 if streak >= MISS_STREAK_THRESHOLD else old_weight
-            new_weight = max(0.1, new_weight)  # floor
+            new_weight = max(0.1, new_weight)
             db._conn.execute(
                 """INSERT OR REPLACE INTO search_topic_weights
                    (topic_name, weight, hit_count, miss_streak, last_produced_date, updated_at)
@@ -152,7 +200,7 @@ def _update_weights(db, topic_scores: Counter, today: str):
     db._conn.commit()
 
 
-def _select_next_queries(db) -> dict:
+def _select_next_queries(db, today: str) -> dict:
     """Select top-N academic topics and top livelihood topic for next search."""
     # Academic: pick top topics by weight
     acad_names = [name for name, _ in ACADEMIC_TOPICS]
@@ -193,7 +241,8 @@ def _select_next_queries(db) -> dict:
 
     # Check for entity drift — new entities in last 7 days
     entity_rows = db._conn.execute(
-        "SELECT entities FROM news_snippets WHERE date >= date('now', '-7 days')"
+        "SELECT entities FROM news_snippets WHERE date >= date(?, '-7 days')",
+        (today,),
     ).fetchall()
     new_entities = _detect_new_entities(entity_rows)
 
@@ -242,9 +291,9 @@ def main(date_str: str | None = None):
     if not report:
         print("[search_feedback] No report found, writing default queries for tomorrow")
         queries = {
-            "academic": ACADEMIC_TOPICS[0][1],
+            "academic": TOPIC_QUERIES.get(ACADEMIC_TOPICS[0][0], ""),
             "policy": POLICY_QUERY,
-            "livelihood": LIVELIHOOD_TOPICS[0][1],
+            "livelihood": TOPIC_QUERIES.get(LIVELIHOOD_TOPICS[0][0], ""),
         }
         _write_next_day_cache(queries, tomorrow)
         return
@@ -267,9 +316,17 @@ def main(date_str: str | None = None):
     # Score today's topics
     acad_scores = _score_academic_topics(report)
     live_scores = _score_livelihood_topics(report)
+
+    # Ensure all topics are represented (even with score 0 for miss tracking)
     all_scores = Counter()
     all_scores.update(acad_scores)
     all_scores.update(live_scores)
+    for name, _ in ACADEMIC_TOPICS:
+        if name not in all_scores:
+            all_scores[name] = 0
+    for name, _ in LIVELIHOOD_TOPICS:
+        if name not in all_scores:
+            all_scores[name] = 0
 
     print(f"[search_feedback] Academic scores: {dict(acad_scores)}")
     print(f"[search_feedback] Livelihood scores: {dict(live_scores)}")
@@ -278,7 +335,7 @@ def main(date_str: str | None = None):
     _update_weights(db, all_scores, today)
 
     # Select next-day queries
-    next_queries = _select_next_queries(db)
+    next_queries = _select_next_queries(db, today)
     _write_next_day_cache(next_queries, tomorrow)
 
     db.close()
