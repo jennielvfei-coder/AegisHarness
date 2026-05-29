@@ -21,7 +21,7 @@ from typing import Optional
 
 import numpy as np
 
-from _utils import softmax_dict as _softmax  # shared implementation
+from harness._utils import softmax_dict as _softmax  # shared implementation
 
 DEFAULT_ALPHAS = {
     "user_msg": 0.20,

@@ -15,7 +15,7 @@ from typing import Optional
 
 import numpy as np
 
-from _utils import cosine_sim as _cosine  # shared implementation
+from harness._utils import cosine_sim as _cosine  # shared implementation
 
 
 def check_continuity(
