@@ -57,3 +57,6 @@ harness/latest_session.jsonl
 # OS
 .DS_Store
 Thumbs.db
+
+# DuoNews (separate repo, not part of AegisHarness)
+duonews/
