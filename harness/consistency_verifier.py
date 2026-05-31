@@ -20,7 +20,7 @@ from typing import Optional
 
 import numpy as np
 
-from harness._utils import cosine_sim as _cosine  # shared implementation
+from _utils import cosine_sim as _cosine  # shared implementation
 
 
 @dataclass
@@ -93,16 +93,38 @@ def verify(
     has_false_belief = len(belief_traces) > 0
 
     # ── Find nearest successful sessions as baseline ──
+    # Try high-quality first, then fall back to any sessions with quality > 0
     successful = db.get_successful_sessions(min_quality=0.7, limit=30)
+    if not successful:
+        successful = db.get_successful_sessions(min_quality=0.1, limit=30)
 
-    # Cold-start fallback: no successful sessions yet → skip verification
+    # Fallback: use success_pattern fragments as supplementary baselines
+    if not successful:
+        try:
+            cur = db._conn.execute(
+                "SELECT source_session, confidence, content FROM fragments "
+                "WHERE fragment_type='success_pattern' "
+                "ORDER BY created_at DESC LIMIT 30"
+            )
+            for row in cur.fetchall():
+                successful.append({
+                    "session_id": row[0],
+                    "session_quality": row[1],
+                    "fusion_vector": None,  # no embedding, but content-based baseline
+                    "content": row[2],
+                })
+        except Exception:
+            pass
+
+    # Cold-start fallback: no baselines at all → skip verification
     if not successful:
         return VerificationReport(
             error_type="none",
             confidence=0.3,
             recommended_action="Insufficient baseline data — deferring verification. "
-                             "Will engage after 2+ sessions with quality > 0.7.",
-            evidence="No successful sessions in fusion_sessions (min_quality=0.7). "
+                             "Will engage after 1+ sessions with quality > 0.1 "
+                             "or success_pattern fragments.",
+            evidence="No fusion sessions or success_pattern fragments available. "
                      "This is expected during cold start.",
             details={"cold_start": True, "sessions_available": 0},
         )

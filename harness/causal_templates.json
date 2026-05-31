@@ -1,0 +1,50 @@
+{
+  "同步异源": {
+    "feature_ids": ["A5"],
+    "templates": [
+      {"cause": "跨域共同因果源驱动", "statement": "{domain}的政治、市场、技术三域同步源于共同的{root_cause}，非独立事件聚合"},
+      {"cause": "独立但同向响应", "statement": "{domain}各域独立响应同一外部冲击{shock}，观测到同步性但因果独立"},
+      {"cause": "观测偏差", "statement": "{domain}的同步性被数据采集窗口放大，实际异步但观测时间对齐造成假同步"}
+    ]
+  },
+  "叙事-现实脱钩": {
+    "feature_ids": ["B1"],
+    "templates": [
+      {"cause": "基本面滞后吸收", "statement": "{domain}的现实变化尚未被公众叙事吸收，存在{time_window}的认知滞后"},
+      {"cause": "叙事被有意维持", "statement": "{domain}的{actor}主动维持乐观叙事以支撑{asset}估值"},
+      {"cause": "指标选择偏差", "statement": "{domain}的{metric}指标未能捕获真实变化，造成脱钩假象而非真正的脱钩"}
+    ]
+  },
+  "流动性遮蔽": {
+    "feature_ids": ["D2"],
+    "templates": [
+      {"cause": "央行操作掩蔽", "statement": "{central_bank}的{operation}操作暂时平抑了{market}的结构性压力信号"},
+      {"cause": "资本流动窗口", "statement": "短期资本流入为{market}提供了暂时稳定，掩盖了{problem}的结构性恶化"},
+      {"cause": "统计滞后", "statement": "{indicator}的统计发布延迟导致流动性信号滞后于真实压力累积"}
+    ]
+  },
+  "象征性让步": {
+    "feature_ids": ["C4"],
+    "templates": [
+      {"cause": "压力释放阀", "statement": "{actor}做出{concession}让步以释放外部压力，同时保持核心{domain}政策不变"},
+      {"cause": "拖延策略", "statement": "{actor}以小规模让步换取时间，等待{condition}条件变化后再做实质性决策"},
+      {"cause": "测试水温", "statement": "{actor}的让步是对{opponent}反应的测试，根据反馈决定后续策略升级或缓和"}
+    ]
+  },
+  "协调痕迹": {
+    "feature_ids": ["C1"],
+    "templates": [
+      {"cause": "高层协调", "statement": "{domain}的政策、媒体、资本三方同步转向源于{level}级别的事先协调"},
+      {"cause": "共享信息优势", "statement": "多个独立系统同步响应是因为共享了{information}这一非公开信息源"},
+      {"cause": "市场自组织", "statement": "{domain}的同步性源于竞争主体独立但理性的同向博弈，非显式协调"}
+    ]
+  },
+  "利润池迁移": {
+    "feature_ids": ["D3"],
+    "templates": [
+      {"cause": "技术平台更替", "statement": "产业价值从{from_layer}向{to_layer}迁移是{technology}技术成熟后的必然结构性转移"},
+      {"cause": "需求拉动", "statement": "下游{application}需求爆发拉动{to_layer}价值上升，上游{from_layer}商品化加速"},
+      {"cause": "资本先导", "statement": "资本先于实际收入向{to_layer}流动，提前定价了尚未充分实现的利润池迁移"}
+    ]
+  }
+}

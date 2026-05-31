@@ -799,19 +799,43 @@ class HarnessDB:
         evidence: str = "",
         recommended_action: str = "",
         escalation_blocked_reason: str = "",
+        tool_name: str = "",
+        match_pattern: str = "",
     ) -> int:
         """Insert a belief trace row."""
         with self._lock:
             cur = self._conn.execute(
                 """INSERT INTO belief_traces
                    (session_id, belief_type, confidence, evidence, recommended_action,
-                    escalation_blocked_reason)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                    escalation_blocked_reason, tool_name, match_pattern)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (session_id, belief_type, confidence, evidence, recommended_action,
-                 escalation_blocked_reason or None),
+                 escalation_blocked_reason or None, tool_name, match_pattern),
             )
             self._conn.commit()
             return cur.lastrowid
+
+    def mark_belief_verified(
+        self,
+        session_id: str,
+        belief_type: str,
+        was_correct: int = 1,
+        reason: str = "",
+    ) -> int:
+        """Mark all unverified belief traces matching session+type as verified.
+
+        Returns number of rows updated.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                """UPDATE belief_traces
+                   SET was_correct = ?,
+                       recommended_action = recommended_action || ' [verified: ' || ? || ']'
+                   WHERE session_id = ? AND belief_type = ? AND was_correct = 0""",
+                (was_correct, reason[:60], session_id, belief_type),
+            )
+            self._conn.commit()
+            return cur.rowcount
 
     def save_false_belief(
         self,

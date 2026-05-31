@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -34,7 +35,8 @@ def _load_weights(config_path: Optional[Path] = None) -> dict:
         with open(config_path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f)
         return config.get("mind_theory", {}).get("session_quality", DEFAULT_WEIGHTS)
-    except Exception:
+    except Exception as e:
+        print(f"[harness] ERROR [session_quality._load_weights] {e}", file=sys.stderr, flush=True)
         return DEFAULT_WEIGHTS
 
 
@@ -91,17 +93,25 @@ def _compute_context_alignment(
 
 
 def _check_user_correction(db_path: Path, session_id: str) -> int:
-    """Check signal_buffer for correction events in this session."""
+    """Check signal_buffer for correction events in this session.
+
+    Returns:
+        1 if correction found, 0 if no correction, -1 if DB query failed.
+    """
     try:
         conn = sqlite3.connect(str(db_path), timeout=2)
         cur = conn.execute(
-            "SELECT COUNT(*) FROM signal_buffer WHERE signal_type = 'correction'"
+            "SELECT COUNT(*) FROM signal_buffer "
+            "WHERE signal_type = 'correction' AND session_id = ?",
+            (session_id,)
         )
         count = cur.fetchone()[0]
         conn.close()
         return 1 if count > 0 else 0
-    except Exception:
-        return 0
+    except Exception as e:
+        print(f"[harness] ERROR [session_quality._check_user_correction] {e}",
+              file=sys.stderr, flush=True)
+        return -1
 
 
 def _check_session_completed(entries: list[dict]) -> int:
@@ -198,9 +208,17 @@ def compute_quality(
     context_alignment = _compute_context_alignment(
         transcript_text, observer_tags or [], tool_types or [],
     )
-    user_correction = _check_user_correction(db_path, session_id)
+    user_correction_raw = _check_user_correction(db_path, session_id)
     session_completed = _check_session_completed(entries)
     hit_rate = _compute_hit_rate(observer_tags or [], tool_types or [])
+
+    if user_correction_raw == -1:
+        print(f"[harness] WARNING session_quality: correction check failed "
+              f"for {session_id} — treating as unknown (no penalty applied)",
+              file=sys.stderr, flush=True)
+        user_correction = 0  # unknown → don't penalize
+    else:
+        user_correction = user_correction_raw
 
     quality = (
         weights["w_context_used"] * context_alignment
@@ -210,3 +228,70 @@ def compute_quality(
     )
 
     return round(max(0.0, min(1.0, quality)), 3)
+
+
+def extract_success_patterns(
+    session_id: str,
+    quality: float,
+    tool_types: list[str],
+    observer_tags: list[str],
+    has_correction: bool,
+    has_failure: bool,
+    goal_type: str = "",
+    goal_confidence: float = 0.0,
+) -> list[dict]:
+    """Extract what went RIGHT in this session — symmetric to failure detection.
+
+    Returns list of success pattern dicts ready for fragment storage.
+    Each dict has: tag, content, confidence, fragment_type='success_pattern'.
+
+    Only extracts when the session was genuinely successful (quality > 0.3,
+    no corrections, no failures).
+    """
+    if quality < 0.3 or has_correction or has_failure:
+        return []
+
+    patterns = []
+
+    # Pattern 1: Effective tool combination
+    if len(tool_types) >= 2:
+        tool_combo = "+".join(sorted(set(tool_types)))
+        patterns.append({
+            "tag": f"success-tool-combo:{tool_combo}",
+            "content": f"Session {session_id}: effective tool combination [{tool_combo}] "
+                       f"with quality={quality:.2f}. Tools: {', '.join(tool_types)}. "
+                       f"Tags: {', '.join(observer_tags) if observer_tags else 'none'}.",
+            "confidence": min(quality + 0.2, 1.0),
+        })
+
+    # Pattern 2: Successful domain handling
+    if observer_tags:
+        for tag in observer_tags:
+            if tag not in ("general", "routine", "exploration"):
+                patterns.append({
+                    "tag": f"success-domain:{tag}",
+                    "content": f"Session {session_id}: successfully handled [{tag}] task "
+                               f"with quality={quality:.2f}. "
+                               f"Goal: {goal_type} (conf={goal_confidence:.2f}).",
+                    "confidence": quality,
+                })
+
+    # Pattern 3: Accurate goal prediction
+    if goal_type and goal_type != "unknown" and goal_confidence >= 0.5:
+        patterns.append({
+            "tag": f"success-goal:{goal_type}",
+            "content": f"Session {session_id}: goal [{goal_type}] predicted with "
+                       f"confidence={goal_confidence:.2f}, session quality={quality:.2f}. "
+                       f"No failures or corrections.",
+            "confidence": goal_confidence,
+        })
+
+    # Pattern 4: Clean session marker (for cold-start baselines)
+    patterns.append({
+        "tag": "success-clean-session",
+        "content": f"Session {session_id}: clean execution — quality={quality:.2f}, "
+                   f"tools={len(tool_types)}, corrections=0, failures=0.",
+        "confidence": quality,
+    })
+
+    return patterns

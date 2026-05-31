@@ -25,7 +25,7 @@ from typing import Optional
 
 import numpy as np
 
-from harness._utils import cosine_sim, cosine_knn
+from _utils import cosine_sim, cosine_knn
 
 
 @dataclass

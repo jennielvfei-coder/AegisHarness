@@ -1,68 +1,44 @@
-```
-```
 ```markdown
 ---
-name: harness-gap-contradiction-analysis
-description: Introspect an AI governance harness to identify knowledge‑action gaps, detect self‑contradictions in improvement plans, and prioritise fixes.
-tags: [ai-governance, privacy, news-workflow, data-compliance, contract-review]
+name: harness-state-sql-diagnostics
+description: Diagnose harness health and error accumulation by directly querying harness/state.db
+tags: [ai-governance, prethink:exploration]
 triggers:
-  - "harness还有什么需要补足提升的地方"
-  - "分析当前系统的缺陷"
-  - "审查架构并提出改进优先顺序"
-  - "这个方案自相矛盾吗"
+  - "User asks about harness state, errors, hypotheses, or component health"
+  - "harness daemon analyze command fails or path issues"
 version: 1
-harness_confidence: 0.82
+harness_confidence: 0.9
 ---
 
-# Harness Gap & Contradiction Analysis
+# Harness State SQL Diagnostics
 
 ## 执行逻辑
-
 ### When to Use
-- After multiple sessions where the harness under‑performs or forgets lessons.
-- Before implementing new features, to avoid reinforcing latent contradictions.
-- When a proposed improvement plan feels intuitively off but the reason isn’t clear.
+When the harness daemon command fails (e.g., path issues, Python not found) or when detailed insight into judgment graph, error counts, and hypotheses is needed quickly. Use direct SQL queries on the harness state database.
 
-### Step‑by‑Step
-
-1. **Load & diff current state**
-   - Read the memory file, configuration, key daemon sources (`harness_daemon.py`, `injector.py`).
-   - Run `git log` summarised recent changes.
-   - Identify what the system “knows” vs what it actually does.
-
-2. **Surface the knowledge‑action chasm**
-   - List features that are documented, seeded, partially built but never completed (e.g., `preflight_check` fragment exists, no executable check).
-   - Flag patterns like “知道但没做” (known failure mode described but not prevented).
-
-3. **Map dependencies & 隐藏成本**
-   - For each proposed fix, ask *“如果这个改动需要先有另一个未实现的能力，顺序是什么？”* (Does P0 truly need P2?)
-   - Quantify context‑bloat risk: will an extra check output 1 line or 10? Aim for **single‑line status indicators** not explanatory paragraphs.
-   - Identify symbiotic pairs (e.g., executable preflight ↔ cross‑session data store).
-
-4. **Detect self‑contradictions in the improvement plan**
-   - Search for paradoxes like “治疗一种病时加重另一种病” (curing one illness while worsening another).
-   - Example: Reducing injector bloat by adding more preflight output – mark as contradiction and re‑design for minimal signal.
-
-5. **Prioritise ruthlessly**
-   - Upgrades that close the knowledge‑action gap and serve as building blocks for other fixes get highest priority.
-   - One‑shot config fixes (`skipWebFetchPreflight`) rank low unless they block other work.
-   - Anything that increases context size is demoted unless no alternative exists.
+### Step-by-Step
+1. **Connect to SQLite**: `import sqlite3; db = sqlite3.connect('harness/state.db')`
+2. **Aggregate Judgment Health**: Query `judgment_entries` for total count and average confidence (extracting `$.confidence` via `json_extract`).
+3. **Error/Feature Activations**: Count rows in `feature_activations` where `json_extract(payload, '$.type')` contains 'error' or 'fail'.
+4. **Hypotheses Status**: Select all from `hypotheses` showing `hypothesis_id`, `status`, and `json_extract(payload, '$.description')`.
+5. **Signal Buffer Errors**: Count signals in `signal_buffer` where `json_extract(payload, '$.signal_type')` contains 'error' or 'fail'.
+6. **Recent Judgments**: Retrieve last 10 entries from `judgment_entries` with extracted `category` and `confidence`.
+7. **Schema Validation (if needed)**: Use `PRAGMA table_info(table)` to confirm column names.
 
 ### How to Verify
-- Every identified gap must be accompanied by a concrete, falsifiable statement (e.g., “preflight check exists as text but is never executed by code”).
-- Each contradiction must be explicitly resolved; if unresolvable now, create a **debt tracker** with a trigger condition.
+- All queries execute without SQL errors. 
+- Outputs show meaningful counts > 0 if data exists; otherwise tables may be empty.
+- Compare counts with expectations (e.g., error activations should reflect recent failures).
 
 ## 异常处理
-
 ### Edge Cases
-- **Unfixable contradictions**: e.g., low context budget and high observability need. Mark as “resource‑bound tradeoff” and record the accepted risk.
-- **Dormant failures**: memory entries about errors that haven’t recurred recently – evaluate whether the underlying condition is still present before spending cycles.
+- **DB missing**: file 'harness/state.db' not found; then harness may not be initialized.
+- **JSON extraction fails**: If payload is not valid JSON, `json_extract` returns NULL. Handle with COALESCE or check schema.
+- **Empty tables**: If no data yet, indicate "no entries".
 
 ### Fallback
-If the full analysis is too heavy (session context low), use a rapid alternate:
-1. Ask *“为了让这个改进生效，什么必须成立？”*
-2. Check whether that prerequisite exists today.
-3. If not, the improvement is blocked – only then decide to build the prerequisite or postpone.
-
-> This skill itself is a **meta‑skill**: apply it whenever you plan significant harness modifications to avoid architecture‑level mistakes.
+If direct DB query fails:
+1. Attempt `python harness/harness_daemon.py analyze` (with correct path separators).
+2. Check if harness process is running (`tasklist` on Windows, `ps` on Unix).
+3. Manually inspect latest log files in `harness/` for error messages.
 ```

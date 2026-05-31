@@ -10,8 +10,39 @@ HARD CONSTRAINTS:
   - "routine" exits at Node1 (skip Node2+Node3 = zero overhead)
 """
 
+import sys
+import yaml
 from dataclasses import dataclass, field
+from pathlib import Path
 from pocketflow import Node, Flow
+
+
+def _load_prethink_config() -> dict:
+    """Load prethink thresholds from harness_config.yaml, with hardcoded defaults."""
+    defaults = {
+        "signal_weights": {
+            "blocking": 15, "correction": 10, "preference": 8,
+            "recent_errors_bonus": 20, "last_action_bonus": 10,
+            "multi_tool_bonus": 5, "recent_errors_threshold": 3,
+            "multi_tool_threshold": 5,
+        },
+        "risk_tiers": {"high": 25, "medium": 12, "exploration": 5},
+        "budget": {
+            "recurring_failure_blocking": 38, "correction_blocking": 35,
+            "recurring_failure_efficiency": 25, "correction_efficiency": 20,
+            "exploration_efficiency": 18, "exploration_enhancement": 10,
+            "preference_enhancement": 8, "routine_enhancement": 5, "default": 10,
+        },
+    }
+    try:
+        config_path = Path(__file__).resolve().parent / "harness_config.yaml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        return config.get("prethink", defaults)
+    except Exception:
+        return defaults
+
+
+_prethink_cfg = _load_prethink_config()
 
 
 @dataclass
@@ -75,35 +106,37 @@ class PrejudgeNode(Node):
         msg = prep_res["msg"]
         triggers: list[str] = []
         score = 0
+        sw = _prethink_cfg["signal_weights"]
+        rt = _prethink_cfg["risk_tiers"]
 
         for signal_type, cfg in self.SIGNALS.items():
             for kw in cfg["keywords"]:
                 if kw.lower() in msg:
-                    score += cfg["weight"]
+                    score += sw.get(signal_type, cfg["weight"])
                     triggers.append(f"{signal_type}:{kw}")
                     break
 
-        if prep_res["recent_error_count"] >= 3:
-            score += 20
+        if prep_res["recent_error_count"] >= sw.get("recent_errors_threshold", 3):
+            score += sw.get("recent_errors_bonus", 20)
             triggers.append(f"recent_errors:{prep_res['recent_error_count']}")
 
         if prep_res["last_action"] in ("create_skill", "patch_skill"):
-            score += 10
+            score += sw.get("last_action_bonus", 10)
             triggers.append(f"last_action:{prep_res['last_action']}")
 
-        # Multi-tool sessions without risk keywords → still not "routine"
-        # Exploration without failure is low-risk, but needs context budget
         tool_count = prep_res.get("tool_count", 0)
-        if score == 0 and tool_count >= 5:
-            score = 5
+        if score == 0 and tool_count >= sw.get("multi_tool_threshold", 5):
+            score = sw.get("multi_tool_bonus", 5)
             triggers.append("multi_tool:exploration")
 
         if score == 0:
             tier = "routine"
-        elif score >= 25:
+        elif score >= rt.get("high", 25):
             tier = "high"
-        elif score >= 12:
+        elif score >= rt.get("medium", 12):
             tier = "medium"
+        elif score >= rt.get("exploration", 5):
+            tier = "low"
         else:
             tier = "low"
 
@@ -272,8 +305,9 @@ class AnchorNode(Node):
             )
             result["anchor_fragments"] = [row[0] for row in cur.fetchall()]
 
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[harness] ERROR [prethink.AnchorNode] {e}",
+                  file=sys.stderr, flush=True)
 
         return result
 
@@ -314,9 +348,11 @@ class BudgetNode(Node):
         }
 
     def exec(self, prep_res):
-        budget = self.BUDGET.get(
-            (prep_res["situation"], prep_res["severity"]), 10,
-        )
+        # Read from config with class-level BUDGET as fallback
+        cfg = _prethink_cfg["budget"]
+        key = f"{prep_res['situation']}_{prep_res['severity']}"
+        budget = cfg.get(key, self.BUDGET.get(
+            (prep_res["situation"], prep_res["severity"]), cfg.get("default", 10)))
         return {"injection_budget": budget}
 
     def post(self, shared, prep_res, exec_res):

@@ -18,6 +18,16 @@ SIGNAL_BUFFER_TABLE = "signal_buffer"
 CONSTRAINT_CACHE_PATH = HARNESS_DIR / ".constraint_cache.json"
 EXECUTION_FLAG_PATH = HARNESS_DIR / ".execution_flag.json"
 
+
+def _log_err(source: str, exc: Exception, ctx: dict | None = None):
+    """Log harness error to stderr. Never raises, never blocks."""
+    try:
+        ctx_str = f" | {ctx}" if ctx else ""
+        print(f"[harness] ERROR [{source}]{ctx_str} {exc}", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
+
 # ── Schema init (idempotent, runs on first call) ──
 
 def _ensure_tables():
@@ -57,8 +67,8 @@ def _load_constraints() -> list:
         if CONSTRAINT_CACHE_PATH.exists():
             data = json.loads(CONSTRAINT_CACHE_PATH.read_text(encoding="utf-8"))
             return data if isinstance(data, list) else []
-    except Exception:
-        pass
+    except Exception as e:
+        _log_err("hooks._load_constraints", e)
     return []
 
 
@@ -84,8 +94,8 @@ def _read_execution_flag() -> dict | None:
     try:
         if EXECUTION_FLAG_PATH.exists():
             return json.loads(EXECUTION_FLAG_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        pass
+    except Exception as e:
+        _log_err("hooks._read_execution_flag", e)
     return None
 
 
@@ -93,8 +103,8 @@ def _clear_execution_flag():
     """Clear the execution flag (user has seen output and responded)."""
     try:
         EXECUTION_FLAG_PATH.unlink(missing_ok=True)
-    except Exception:
-        pass
+    except Exception as e:
+        _log_err("hooks._clear_execution_flag", e)
 
 
 def _set_execution_flag(tool_name: str):
@@ -104,13 +114,27 @@ def _set_execution_flag(tool_name: str):
             json.dumps({"tool": tool_name, "timestamp": time.time()}, ensure_ascii=False),
             encoding="utf-8",
         )
-    except Exception:
-        pass
+    except Exception as e:
+        _log_err("hooks._set_execution_flag", e, {"tool": tool_name})
+
+
+# PowerShell cmdlets that MUST use the PowerShell tool, not Bash
+_PS_CMDLETS = (
+    r"\b(Test-Path|Get-ChildItem|Select-Object|ForEach-Object|"
+    r"Write-Output|Set-Content|Out-File|New-Item|Remove-Item|"
+    r"Get-Content|Measure-Object|Select-String|Where-Object|"
+    r"Invoke-WebRequest|Invoke-RestMethod|Start-Process|Stop-Process|"
+    r"Copy-Item|Move-Item|Rename-Item|"
+    r"Out-Null|Format-Table|Format-List|Export-Csv|Import-Csv|"
+    r"ConvertFrom-Json|ConvertTo-Json|Tee-Object|Sort-Object|"
+    r"Group-Object|Compare-Object)\b"
+)
 
 
 def pre_tool_use(tool_name: str, tool_input: str):
-    """PreToolUse hook — constraint block + execution-pause check.
+    """PreToolUse hook — PS cmdlet detection + constraint block + execution-pause check.
 
+    PS cmdlet detection: Bash tool called with PowerShell cmdlets → hard block.
     Constraint block: match active constraint = inject hard block context.
 
     Execution pause: if an Edit/Write follows an external data result
@@ -118,6 +142,21 @@ def pre_tool_use(tool_name: str, tool_input: str):
     inject a soft reminder to confirm diagnosis before editing.
     This catches the "found something → immediately started coding" pattern.
     """
+    # ── PS cmdlet in Bash tool detection ──
+    if tool_name == "Bash":
+        import re
+        if re.search(_PS_CMDLETS, tool_input, re.IGNORECASE):
+            matched_cmdlets = re.findall(_PS_CMDLETS, tool_input, re.IGNORECASE)
+            unique = list(set(matched_cmdlets))[:5]
+            print(
+                f"\n🛑 Bash 工具不能执行 PowerShell cmdlet: {', '.join(unique)}\n"
+                f"   请改用 PowerShell 工具。Bash 工具只支持 POSIX/bash 语法。\n"
+            )
+            print(
+                f"[harness] ⛔ BLOCKED: Bash called with PS cmdlet(s) {unique}",
+                file=sys.stderr,
+            )
+
     # ── Constraint block (existing) ──
     matched = _check_constraints(tool_name, tool_input)
     if matched:
@@ -201,8 +240,8 @@ def post_tool_use(tool_name: str, tool_input: str, tool_output: str = ""):
             )
         conn.commit()
         conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        _log_err("hooks.post_tool_use", e, {"tool": tool_name, "status": status})
 
     # Within-session constraint propagation: detect failure → block same-session retries
     if status == "error":
@@ -270,8 +309,8 @@ def user_prompt_submit(message: str = ""):
             )
             conn.commit()
             conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            _log_err("hooks.user_prompt_submit", e, {"signal_type": signal_type})
 
     # Also detect context_reference: did Claude use harness-injected context?
     _detect_context_reference(message)
@@ -280,7 +319,7 @@ def user_prompt_submit(message: str = ""):
 def _propagate_within_session_constraint(tool_name: str, tool_input: str, tool_output: str):
     """Detect tool failure → write temporary constraint to cache for same-session blocking.
 
-    Uses omega_predictor._analyze_tool_failure (shared, zero-LLM) to classify the error.
+    Inlines error classification (previously imported non-existent _analyze_tool_failure).
     Network/permission failures get a temporary 1-hour constraint written to the cache
     that PreToolUse reads. This closes the within-session loop:
       PostToolUse detects failure → constraint_cache updated → PreToolUse blocks retry.
@@ -289,21 +328,37 @@ def _propagate_within_session_constraint(tool_name: str, tool_input: str, tool_o
     not to pollute future sessions (permanent constraints come from cmd_observe).
     """
     try:
-        # Lazy import — hooks must stay <500ms
-        from omega_predictor import _analyze_tool_failure
+        output_lower = tool_output[:500].lower() if tool_output else ""
 
-        # Build a minimal tool_result-like entry for the shared analyzer
-        entry = {
-            "type": "tool_result",
-            "name": tool_name,
-            "input": {"command": tool_input} if tool_name == "Bash" else {"url": tool_input},
-            "content": tool_output[:500] if tool_output else "",
-        }
+        # Inline error classification — classifies and extracts match pattern
+        error_category = None
+        match_pattern = ""
 
-        info = _analyze_tool_failure(entry)
-        if info is None:
+        if any(e in output_lower for e in ("timeout", "etimedout", "timed out")):
+            error_category = "network"
+        elif any(e in output_lower for e in ("dns", "resolve", "unreachable",
+                                               "econnrefused", "refused", "name or service")):
+            error_category = "network"
+        elif any(e in output_lower for e in ("permission", "denied", "blocked",
+                                               "forbidden", "unauthorized", "403", "401")):
+            error_category = "permission"
+
+        if error_category is None:
             return
-        if info.error_category not in ("network", "permission"):
+
+        # Extract match pattern from tool input
+        if tool_name == "WebFetch":
+            import re
+            m = re.search(r'https?://[^\s"\')]+', tool_input)
+            match_pattern = m.group(0)[:80] if m else tool_input[:80]
+        elif tool_name == "WebSearch":
+            match_pattern = tool_input[:80]
+        elif tool_name == "Bash":
+            match_pattern = tool_input[:100]
+        else:
+            match_pattern = tool_input[:80]
+
+        if not match_pattern:
             return
 
         # Load existing cache
@@ -313,11 +368,12 @@ def _propagate_within_session_constraint(tool_name: str, tool_input: str, tool_o
                 constraints = json.loads(CONSTRAINT_CACHE_PATH.read_text(encoding="utf-8"))
                 if not isinstance(constraints, list):
                     constraints = []
-            except Exception:
-                pass
+            except Exception as e:
+                _log_err("hooks._propagate_within_session_constraint", e)
+                constraints = []
 
         # Check if a constraint for this tool+pattern already exists
-        pattern_lower = info.match_pattern.lower()
+        pattern_lower = match_pattern.lower()
         for c in constraints:
             c_pattern = c.get("match_pattern", "").lower()
             if c.get("tool_name") == tool_name and c_pattern == pattern_lower:
@@ -326,11 +382,11 @@ def _propagate_within_session_constraint(tool_name: str, tool_input: str, tool_o
         # Create temporary constraint
         import time as _time
         temp_constraint = {
-            "name": f"auto:within-session {info.error_category} → {info.match_pattern[:60]}",
+            "name": f"auto:within-session {error_category} → {match_pattern[:60]}",
             "tool_name": tool_name,
-            "match_pattern": info.match_pattern,
+            "match_pattern": match_pattern,
             "action": "block",
-            "message": f"本会话中 {tool_name}({info.match_pattern[:80]}) 失败。"
+            "message": f"本会话中 {tool_name}({match_pattern[:80]}) 失败。"
                        f"临时阻断同类调用 (有效期: 1小时)。",
             "violations": 0,
             "max_violations": 3,
@@ -343,8 +399,32 @@ def _propagate_within_session_constraint(tool_name: str, tool_input: str, tool_o
             json.dumps(constraints, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-    except Exception:
-        pass  # Never let propagation crash the hook
+
+        # Also sync to DB constraints table so violation tracking is consistent
+        try:
+            conn = sqlite3.connect(str(DB_PATH), timeout=2)
+            cur = conn.execute(
+                "SELECT id FROM constraints WHERE tool_name=? AND match_pattern=? "
+                "AND active=1 AND (expires_at IS NULL OR expires_at > unixepoch())",
+                (tool_name, match_pattern),
+            )
+            existing = cur.fetchone()
+            if not existing:
+                conn.execute(
+                    "INSERT INTO constraints (name, tool_name, match_pattern, action, "
+                    "message, source_session, violation_count, max_violations, "
+                    "expires_at, active, created_at) "
+                    "VALUES (?, ?, ?, 'block', ?, 'within-session', 0, 3, ?, 1, unixepoch())",
+                    (temp_constraint["name"], tool_name, match_pattern,
+                     temp_constraint["message"], _time.time() + 3600),
+                )
+                conn.commit()
+            conn.close()
+        except Exception:
+            pass  # DB sync is best-effort; cache is the primary store for hooks
+
+    except Exception as e:
+        _log_err("hooks._propagate_within_session_constraint", e, {"tool": tool_name})
 
 
 def _detect_context_reference(message: str = ""):
@@ -375,8 +455,8 @@ def _detect_context_reference(message: str = ""):
             )
             conn.commit()
             conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        _log_err("hooks._detect_context_reference", e)
 
 
 def _read_last_history_line() -> str | None:
@@ -390,9 +470,30 @@ def _read_last_history_line() -> str | None:
         if lines:
             last = json.loads(lines[-1].strip())
             return last.get("display", "")[:300]
-    except Exception:
-        pass
+    except Exception as e:
+        _log_err("hooks._read_last_history_line", e)
     return None
+
+
+# ── News routing injection ───────────────────────────────────────────────
+
+def news_detect(message: str = ""):
+    """Check user message against intent_matcher's weighted keyword scoring.
+    Prints full workflow context (source priority, preferences, domain instructions)
+    to stdout → injected as context. Silent on no match. Zero LLM dependency.
+    """
+    msg = message or (_read_last_history_line() or "")
+    if not msg:
+        return
+    try:
+        from intent_matcher import match_intent, inject_workflow_context
+        result = match_intent(msg)
+        if result:
+            context = inject_workflow_context(result)
+            if context:
+                print(context)
+    except Exception as e:
+        _log_err("hooks.news_detect", e, {"msg": msg[:80]})
 
 
 # ── CLI dispatch ──
@@ -416,8 +517,11 @@ def main():
         elif action == "user-msg":
             msg = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else ""
             user_prompt_submit(msg)
-    except Exception:
-        pass  # Never let a hook crash the session
+        elif action == "news-detect":
+            msg = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else ""
+            news_detect(msg)
+    except Exception as e:
+        _log_err("hooks.main", e, {"action": action})
 
 
 if __name__ == "__main__":

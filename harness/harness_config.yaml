@@ -27,6 +27,31 @@ observer:
       - "默认"
       - "下次"
 
+prethink:
+  signal_weights:
+    blocking: 15
+    correction: 10
+    preference: 8
+    recent_errors_bonus: 20
+    last_action_bonus: 10
+    multi_tool_bonus: 5
+    recent_errors_threshold: 3
+    multi_tool_threshold: 5
+  risk_tiers:
+    high: 25
+    medium: 12
+    exploration: 5
+  budget:
+    recurring_failure_blocking: 38
+    correction_blocking: 35
+    recurring_failure_efficiency: 25
+    correction_efficiency: 20
+    exploration_efficiency: 18
+    exploration_enhancement: 10
+    preference_enhancement: 8
+    routine_enhancement: 5
+    default: 10
+
 refiner:
   enabled: true
   model: "deepseek-v4-pro"

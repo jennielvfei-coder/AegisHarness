@@ -32,6 +32,60 @@ HARNESS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(HARNESS_DIR))
 
 
+def _detect_conflicts(situational_model, report) -> list[dict]:
+    """Detect disagreements between PreThink classification and Observer action.
+
+    Returns list of conflict dicts with keys: type, prethink, observer, description.
+    """
+    if situational_model is None:
+        return []
+
+    conflicts = []
+    sm = situational_model
+
+    # Type 1: PreThink detected recurring_failure but Observer didn't act on it
+    if sm.situation == "recurring_failure" and report.action in ("skip", "save_fragment"):
+        conflicts.append({
+            "type": "severity_downgrade",
+            "prethink": sm.situation,
+            "observer": report.action,
+            "description": (
+                f"PreThink detected recurring_failure "
+                f"(conf={sm.confidence:.2f}, severity={sm.severity}), "
+                f"but Observer chose '{report.action}'. "
+                f"Possible false negative — consider reviewing the session."
+            ),
+        })
+
+    # Type 2: PreThink detected correction but Observer skipped
+    if sm.situation == "correction" and report.action == "skip":
+        conflicts.append({
+            "type": "missed_correction",
+            "prethink": sm.situation,
+            "observer": report.action,
+            "description": (
+                f"PreThink detected correction (conf={sm.confidence:.2f}), "
+                f"but Observer chose 'skip'. "
+                f"Possible missed correction signal."
+            ),
+        })
+
+    # Type 3: PreThink classified as routine but Observer found a strong signal
+    if sm.situation == "routine" and report.action == "create_skill":
+        conflicts.append({
+            "type": "unexpected_complexity",
+            "prethink": sm.situation,
+            "observer": report.action,
+            "description": (
+                "PreThink classified as 'routine' but Observer found "
+                "create_skill-worthy signal. PreThink may have missed a pattern."
+            ),
+        })
+
+    return conflicts
+
+
+
 # ─── Injector output budget management ──────────────────────────────────
 
 class InjectorOutput:
@@ -185,12 +239,34 @@ def cmd_observe():
                 report.decision_trajectory = trajectory
                 print(f"[harness] Decision trajectory: {len(trajectory)} turning points "
                       f"({', '.join(p['type'] for p in trajectory[:5])})")
-    except Exception:
-        pass  # trajectory extraction is non-fatal
+    except Exception as e:
+        print(f"[harness] WARNING trajectory extraction failed: {e}", file=sys.stderr, flush=True)
+
+    # ── Conflict detection: PreThink vs Observer ──
+    conflicts = _detect_conflicts(situational_model, report)
+    if conflicts:
+        report.conflicts = conflicts
+        print(f"\n[harness] ⚠️  {len(conflicts)} PreThink/Observer conflict(s):")
+        for c in conflicts:
+            print(f"  [{c['type']}] {c['description']}")
 
     db.save_observation(report)
     print(f"[harness] Observation saved: action={report.action}, "
           f"confidence={report.confidence:.2f}")
+
+    # ── Distribution summary: last 20 observations ──
+    try:
+        from collections import Counter
+        cur = db._conn.execute(
+            "SELECT action FROM observations ORDER BY processed_at DESC LIMIT 20"
+        )
+        recent_actions = [r[0] for r in cur.fetchall()]
+        if recent_actions:
+            dist = Counter(recent_actions)
+            dist_str = ", ".join(f"{a}={c}" for a, c in dist.most_common())
+            print(f"[harness] Observer distribution (last {len(recent_actions)}): {dist_str}")
+    except Exception:
+        pass
 
     # ── News feedback learner: process today's signal_buffer entries ──
     try:
@@ -297,6 +373,40 @@ def cmd_observe():
         except Exception:
             import traceback
             print(f"[harness] mind pipeline error: {traceback.format_exc()}")
+
+    # ── Health check at session end ──
+    try:
+        from health_probes import run_health_check, save_snapshot, check_rollback_triggers, execute_rollback
+        snap = run_health_check(db_path)
+        save_snapshot(snap, db_path)
+        print(f"[harness] Health check: {snap.overall_status} ({len(snap.alerts)} alerts)")
+        if snap.overall_status == "critical":
+            print(f"[harness] HEALTH CRITICAL: {len(snap.alerts)} alert(s)")
+        actions = check_rollback_triggers(snap, db_path)
+        for action in actions:
+            print(f"[harness] ROLLBACK TRIGGERED: {action.component_type} — {action.reason}")
+            result = execute_rollback(action, db_path)
+            print(f"[harness] Rollback: {result.detail}")
+    except Exception as e:
+        if config.get("injector", {}).get("verbose", False):
+            print(f"[harness] Health probe error (non-fatal): {e}")
+
+    # ── Update SelfModel after session processing ──
+    try:
+        from self_model import build_from_state, persist, snapshot
+        sm = build_from_state(db_path)
+        persist(sm)
+        snapshot(sm)
+    except Exception:
+        pass
+
+    # ── Auto-maintenance: close the feedback loop ──
+    try:
+        from auto_maintenance import run as run_auto_maintenance
+        run_auto_maintenance(db_path)
+    except Exception as e:
+        if config.get("injector", {}).get("verbose", False):
+            print(f"[harness] Auto-maintenance error (non-fatal): {e}")
 
     db.close()
 
@@ -668,9 +778,23 @@ def cmd_inject():
     output = InjectorOutput(max_lines=max_lines)
     ctx: dict = {"active": [], "matched": [], "situational_model": situational_model}
 
+    # ── Health check at session start ──
+    health_snapshot = None
+    try:
+        from health_probes import run_health_check
+        health_snapshot = run_health_check(db_path)
+        if health_snapshot.overall_status in ("degraded", "critical"):
+            print(f"[harness] Health check: {health_snapshot.overall_status.upper()} "
+                  f"({len(health_snapshot.alerts)} alerts)", file=sys.stderr, flush=True)
+    except Exception:
+        pass
+
     # ── Load constraint cache for PreToolUse hook ──
+    # Only write when there ARE active constraints — destructive overwrite
+    # would nuke data written by other subsystems (search_feedback, feishu_push, etc.)
     constraints = _load_active_constraints(db_path)
-    _write_constraint_cache(constraints)
+    if constraints:
+        _write_constraint_cache(constraints)
 
     # ── Cross-session trajectory: link this session's corrections to prior session ──
     current_msg = _read_last_user_message()
@@ -683,8 +807,40 @@ def cmd_inject():
     ctx["source_health"] = {label: (passed, detail)
                            for label, passed, detail, _fix in preflight_checks}
 
-    _inject_active_skills(output, ctx, db_path)
-    _inject_pending_reviews(output, skills_dir)
+    # ── ProactiveScanner: preemptive evolution checks ──
+    scanner_results: list = []
+    try:
+        from proactive_scanner import run_scan
+        scanner_results = run_scan(db_path, max_results=3)
+    except Exception:
+        pass
+
+    # ── Build SelfModel (unified state, replaces fragmented injections) ──
+    self_model = None
+    try:
+        from self_model import build_from_state
+        self_model = build_from_state(db_path)
+        # Attach scanner results as predictions
+        for r in scanner_results:
+            from self_model import Prediction
+            self_model.predictions.append(Prediction(
+                domain=r.domain, severity=r.severity, message=r.message,
+            ))
+    except Exception:
+        pass
+
+    # ── SelfModel injection (replaces active_skills, pending_reviews, skill_health, constraint summary, health alerts) ──
+    if self_model:
+        try:
+            from self_model import render_snapshot
+            header, lines = render_snapshot(self_model)
+            output.add(0.92, header, lines)
+        except Exception:
+            _inject_active_skills(output, ctx, db_path)
+            _inject_pending_reviews(output, skills_dir)
+    else:
+        _inject_active_skills(output, ctx, db_path)
+        _inject_pending_reviews(output, skills_dir)
     _inject_trigger_matches(output, ctx, injector_cfg)
     _inject_intent_match(output, ctx, injector_cfg)
 
@@ -697,8 +853,7 @@ def cmd_inject():
     except Exception:
         pass
 
-    _inject_constraints(output, constraints, injector_cfg)
-    _inject_skill_health(output, db_path, injector_cfg)
+    _inject_constraints_detailed(output, constraints)
     _inject_omega_diagnostics(output, db_path)
     _inject_memory_fragments(output, db_path, injector_cfg)
     _inject_failure_patterns(output, db_path, ctx.get("matched", []), injector_cfg)
@@ -717,6 +872,15 @@ def cmd_inject():
     if mind_db:
         try:
             mind_db.close()
+        except Exception:
+            pass
+
+    # Persist SelfModel after injection
+    if self_model:
+        try:
+            from self_model import persist, snapshot
+            persist(self_model)
+            snapshot(self_model)
         except Exception:
             pass
 
@@ -842,6 +1006,26 @@ def _seed_constraints(db, candidates: list[dict], session_id: str):
             ).fetchone()
             if existing:
                 continue
+
+            # Sandbox verification before creating constraint
+            try:
+                from sandbox_verifier import verify_constraint
+                constraint_candidate = {
+                    "tool_name": tool,
+                    "match_pattern": pattern,
+                    "name": f"block-{tool.lower()}-{pattern[:30]}",
+                }
+                vr = verify_constraint(constraint_candidate, db_path=db.db_path)
+                if vr.false_positive_risk > 0.30:
+                    print(f"[harness] Sandbox: SKIPPED constraint for {tool}({pattern[:40]}) "
+                          f"— false positive risk {vr.false_positive_risk:.0%} > 30%")
+                    continue
+                else:
+                    print(f"[harness] Sandbox: constraint for {tool}({pattern[:40]}) OK "
+                          f"(fp_risk={vr.false_positive_risk:.0%})")
+            except Exception:
+                pass  # Non-fatal: proceed with constraint creation if sandbox fails
+
             name = f"block-{tool.lower()}-{pattern[:30].replace('/', '-').replace('.', '-')}"
             message = (
                 f"⛔ 此调用已被 Harness 约束注册表阻断。\n"
@@ -1079,6 +1263,22 @@ def _inject_constraints(output: InjectorOutput, constraints: list[dict], injecto
     output.add(0.9, f"## ⛔ 活跃约束 ({len(constraints)} 项)", lines)
 
 
+def _inject_constraints_detailed(output: InjectorOutput, constraints: list[dict]):
+    """Active constraints — detailed listing only. Summary count is in SelfModel.
+    Priority lowered to 0.82 (SelfModel summary is at 0.92).
+    """
+    if not constraints:
+        return
+    lines = []
+    for c in constraints:
+        escalated = " 🔴已升级" if c["violations"] >= c["max_violations"] else ""
+        lines.append(
+            f"- ⛔ **{c['tool_name']}** `{c['match_pattern'][:50]}` — "
+            f"违反 {c['violations']}/{c['max_violations']}{escaled}"
+        )
+    output.add(0.82, "## ⛔ Constraint Registry", lines)
+
+
 def _inject_intent_match(output: InjectorOutput, ctx: dict, injector_cfg: dict):
     try:
         current_topic = _read_last_user_message()
@@ -1255,11 +1455,13 @@ def _run_mind_pipeline(
             session_id, trace.belief_type, trace.confidence,
             trace.evidence, trace.recommended_action,
             getattr(trace, "escalation_blocked_reason", "") or "",
+            tool_name=getattr(trace, "tool_name", ""),
+            match_pattern=getattr(trace, "match_pattern", ""),
         )
         # ── Save Omega diagnostic context for next-session injection ──
         # Connectivity: context_injection → fragments table → injector reads it
         ctx_inj = getattr(trace, 'context_injection', '')
-        if ctx_inj and trace.belief_type in ("semantic_failure", "knowledge_failure"):
+        if ctx_inj and trace.belief_type in ("semantic_failure", "knowledge_failure", "operation_failure"):
             try:
                 with db._lock:
                     db._conn.execute(
@@ -1339,6 +1541,71 @@ def _run_mind_pipeline(
         if top_goal.falsified:
             print(f"[harness] mind:   top goal FALSIFIED — check alternatives")
 
+    # ── Verification: compare predicted vs actual ──
+    from consistency_verifier import verify, get_verification_summary
+    from psi_predictor import GoalPrediction
+
+    # Fallback goal prediction if psi produced nothing
+    if top_goal is None:
+        top_goal = GoalPrediction(
+            goal_type="unknown", confidence=0.3, domain="general",
+            expected_tools=structure["tool_types"],
+        )
+
+    verif_report = verify(
+        session_id=session_id,
+        goal_prediction=top_goal,
+        belief_traces=belief_traces,
+        actual_actions=structure.get("tool_use_sequence", []),
+        db=db,
+        user_corrections=[e.get("content", "") for e in entries
+                         if e.get("type") == "user"
+                         and any(kw in e.get("content", "") for kw in
+                                ["不对", "错了", "不是这样", "纠正", "重新", "改一下",
+                                 "你忘了", "搞错了"])],
+        error_tool_calls=structure.get("error_tool_calls", []),
+    )
+    print(f"[harness] mind: verify — {get_verification_summary(verif_report)}")
+
+    # If verification found errors, act on them
+    if verif_report.error_type == "goal_error":
+        # Psi retraining: the corrected interaction pair was already saved above
+        print(f"[harness] mind: verify → goal_error → psi retraining data stored")
+    elif verif_report.error_type == "belief_error":
+        # Mark beliefs as verified since verification confirmed the error pattern
+        for trace in belief_traces:
+            db.mark_belief_verified(session_id, trace.belief_type,
+                                    was_correct=1, reason="verification_confirmed")
+        print(f"[harness] mind: verify → belief_error → {len(belief_traces)} beliefs marked verified")
+    elif verif_report.error_type == "skill_gap":
+        print(f"[harness] mind: verify → skill_gap → feeding to observer pipeline")
+    elif verif_report.error_type == "none" and verif_report.confidence > 0.5:
+        # Positive sample: mark beliefs as verified correct
+        for trace in belief_traces:
+            db.mark_belief_verified(session_id, trace.belief_type,
+                                    was_correct=1, reason="verification_passed")
+        if belief_traces:
+            print(f"[harness] mind: verify → none → {len(belief_traces)} beliefs marked correct")
+
+    # ── Retroactive verification: mark old stale belief_traces as resolved ──
+    try:
+        cur = db._conn.execute(
+            "SELECT COUNT(*) FROM belief_traces "
+            "WHERE was_correct = 0 AND created_at < unixepoch() - 259200"  # >3 days old
+        )
+        stale_count = cur.fetchone()[0]
+        if stale_count > 0:
+            # Mark stale unverified beliefs as correct=1 (pattern was transient/fixed)
+            db._conn.execute(
+                "UPDATE belief_traces SET was_correct = 1, "
+                "recommended_action = recommended_action || ' [verified: stale_pattern_resolved]' "
+                "WHERE was_correct = 0 AND created_at < unixepoch() - 259200"
+            )
+            db._conn.commit()
+            print(f"[harness] mind: retroactive verify → {stale_count} stale beliefs marked resolved (>3d old)")
+    except Exception:
+        pass
+
     # ── Encoder: compute source embeddings ──
     from encoder import compute_source_embeddings
 
@@ -1385,6 +1652,35 @@ def _run_mind_pipeline(
         tool_types=structure["tool_types"],
         config_path=config_path,
     )
+
+    # ── Success memory: store what went RIGHT (symmetric to failure tracking) ──
+    from session_quality import extract_success_patterns
+    success_patterns = extract_success_patterns(
+        session_id=session_id,
+        quality=quality,
+        tool_types=structure["tool_types"],
+        observer_tags=report.tags,
+        has_correction=has_correction,
+        has_failure=has_failure,
+        goal_type=top_goal.goal_type if top_goal else "",
+        goal_confidence=top_goal.confidence if top_goal else 0.0,
+    )
+    if success_patterns:
+        try:
+            with db._lock:
+                for sp in success_patterns:
+                    db._conn.execute(
+                        "INSERT INTO fragments(tag, trigger_phrases, content, "
+                        "source_session, confidence, fragment_type, created_at) "
+                        "VALUES(?,?,?,?,?,?,unixepoch())",
+                        (sp["tag"], "", sp["content"][:2000],
+                         session_id, sp["confidence"], "success_pattern"),
+                    )
+                db._conn.commit()
+            print(f"[harness] mind: success memory → {len(success_patterns)} patterns stored "
+                  f"(quality={quality:.3f})")
+        except Exception:
+            pass
 
     # ── Per-source quality (breaks collinearity in single-user systems) ──
     # Provenance: count Read tool calls targeting memory directory from entries list
@@ -2368,6 +2664,32 @@ def cmd_analyze(lookback_days: int = 7):
     except Exception:
         pass
 
+    # ── 3.5. Belief trace recurrence (cross-session) ──
+    try:
+        cur = db._conn.execute(
+            "SELECT belief_type, COUNT(*) as total, "
+            "COUNT(DISTINCT session_id) as sessions, "
+            "AVG(confidence) as avg_conf, "
+            "SUM(CASE WHEN was_correct=1 THEN 1 ELSE 0 END) as verified "
+            "FROM belief_traces "
+            "WHERE created_at > ? "
+            "GROUP BY belief_type "
+            "ORDER BY total DESC",
+            (cutoff,)
+        )
+        bt_rows = cur.fetchall()
+        if bt_rows:
+            print("── Belief Trace Recurrence (cross-session) ──")
+            for btype, total, sessions, conf, verified in bt_rows:
+                verified = verified or 0
+                recurring_flag = " ⚠️ RECURRING" if total >= 3 and sessions >= 2 else ""
+                unverified_flag = " [UNVERIFIED]" if total > 0 and verified == 0 else ""
+                print(f"  {btype:30s} {total:3d} traces × {sessions} sessions"
+                      f"  avg_conf={conf:.2f}  verified={verified}/{total}{recurring_flag}{unverified_flag}")
+            print()
+    except Exception:
+        pass
+
     # ── 4. Skill usage health ──
     try:
         cur = db._conn.execute(
@@ -2951,6 +3273,27 @@ def cmd_review(cli_args=None):
         idx = args.approve - 1
         if 0 <= idx < len(pending):
             skill_path = pending[idx]
+
+            # Sandbox verification before deployment
+            try:
+                from sandbox_verifier import verify_skill
+                db_path_review = Path(config["harness"]["db_path"])
+                sr = verify_skill(skill_path, db_path_review)
+                print(f"\n[harness] Sandbox verification for {skill_path.name}:")
+                print(f"  Risk: {sr.risk_level.upper()}")
+                for check in sr.checks:
+                    status = "PASS" if check.passed else "FAIL"
+                    print(f"  [{status}] {check.check_name}: {check.detail[:120]}")
+                if sr.risk_level == "high":
+                    print(f"\n[harness] WARNING: High risk detected for {skill_path.name}!")
+                    resp = input("    Confirm approve? (y/N): ").strip().lower()
+                    if resp != "y":
+                        print("[harness] Approval cancelled.")
+                        return
+            except Exception as e:
+                if config.get("injector", {}).get("verbose", False):
+                    print(f"[harness] Sandbox verifier error (non-fatal): {e}")
+
             active_dir = Path.home() / ".claude" / "skills"
             active_dir.mkdir(parents=True, exist_ok=True)
             dest = active_dir / skill_path.name  # harness_<type>_<name>.md
@@ -3382,7 +3725,7 @@ def main():
     parser.add_argument(
         "command",
         choices=["observe", "inject", "review", "analyze", "diagnose",
-                 "cleanup", "status", "news-analyze", "feature-lib"],
+                 "cleanup", "status", "news-analyze", "feature-lib", "guardian"],
         nargs="?",
         default=None,
     )
@@ -3420,6 +3763,21 @@ def main():
             cmd_news_analyze(args.date, args.phases)
         elif args.command == "feature-lib":
             cmd_feature_lib(remaining)
+        elif args.command == "guardian":
+            # Delegate to independent guardian subprocess
+            from harness_guardian import run_pulse, run_status, run_daemon
+            if remaining and remaining[0] in ("pulse", "status", "daemon"):
+                sub_cmd = remaining[0]
+                if sub_cmd == "pulse":
+                    run_pulse()
+                elif sub_cmd == "status":
+                    run_status()
+                elif sub_cmd == "daemon":
+                    interval = int(remaining[1]) if len(remaining) > 1 else 60
+                    run_daemon(interval=interval)
+            else:
+                # Default: one-shot pulse
+                run_pulse()
         else:
             parser.print_help()
     except Exception as e:

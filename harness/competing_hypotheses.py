@@ -30,7 +30,7 @@ from typing import Optional
 
 import numpy as np
 
-from harness._utils import cosine_sim
+from _utils import cosine_sim
 
 
 # ── Data model ────────────────────────────────────────────────────────────

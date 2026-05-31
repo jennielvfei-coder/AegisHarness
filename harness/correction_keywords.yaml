@@ -1,0 +1,56 @@
+# Correction keyword categories for cross-session trajectory linking.
+# Edit this file to add/remove keywords — no code change needed.
+#
+# strong: always indicates user is correcting/disagreeing.
+# weak:   context-dependent, only matches when message is short (<200 chars).
+
+strong:
+  - 不对
+  - 错了
+  - 不是这样
+  - 应该是
+  - 改一下
+  - 再想想
+  - 反思
+  - 撤回
+  - 重新做
+  - 先想再
+  - 搞错了
+  - 你忘了
+  - 那个不对
+  - 不行
+  - 胡说
+  - 误导
+  - 肤浅
+  - 空洞
+  - 废话
+  - 拼凑
+  - 牵强
+  - 脱节
+  - 不靠谱
+  - 敷衍
+  - 糊弄
+  - 不严谨
+  - 不合逻辑
+  - 自相矛盾
+  - 不知所云
+  - 没意义
+  - 没深度
+  - 没帮助
+  - 不实用
+  - 混乱
+  - 啰嗦
+  - 不清晰
+  - 不满意
+
+weak:
+  - 重新
+  - 纠正
+  - 换一个
+  - 改改
+  - 不够好
+  - 不够
+  - 差点
+  - 勉强
+  - 凑合
+  - 失望

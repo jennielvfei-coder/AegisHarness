@@ -12,6 +12,7 @@ import argparse
 import sys
 
 STEP_MAP = {
+    "github":     ("harness.news_agent.github_trending", "fetch_github_trending"),
     "search":     ("harness.news_agent.search", "run_daily_search"),
     "arxiv":      ("harness.news_agent.arxiv", "fetch_arxiv"),
     "preprocess": ("harness.news_agent.preprocess", "generate_brief"),
@@ -22,7 +23,7 @@ STEP_MAP = {
     "diagnose":   ("harness.news_agent.diagnose", "run_all_checks"),
 }
 
-PIPELINE_ORDER = ["search", "arxiv", "preprocess", "cross_day", "push", "vectorize", "feedback"]
+PIPELINE_ORDER = ["github", "search", "arxiv", "preprocess", "cross_day", "push", "vectorize", "feedback"]
 
 
 def main():

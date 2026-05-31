@@ -213,12 +213,12 @@ def _detect_knowledge_gap(entries: list[dict]) -> dict | None:
 
 # ── History level determination ──────────────────────────────────────────
 
-def _determine_history(modality: str, detection: dict, db=None) -> str:
+def _determine_history(modality: str, detection: dict, db=None, session_id: str = "") -> str:
     """Determine failure history: single | repeated | cross_session.
 
     - single: first occurrence in this session
     - repeated: >= 3 occurrences in this session
-    - cross_session: appeared in >= 2 sessions (checks constraints table)
+    - cross_session: appeared in >= 2 distinct prior sessions (checks belief_traces)
     """
     if modality == "operation":
         count = detection.get("failure_count", 1)
@@ -236,8 +236,28 @@ def _determine_history(modality: str, detection: dict, db=None) -> str:
         if count >= 3:
             return "repeated"
 
-    # Check cross-session: does this pattern exist in constraints table?
+    # Check cross-session: has this failure modality appeared in prior sessions?
     if db:
+        try:
+            belief_type = f"{modality}_failure"
+            if session_id:
+                row = db._conn.execute(
+                    "SELECT COUNT(DISTINCT session_id) FROM belief_traces "
+                    "WHERE belief_type=? AND session_id != ?",
+                    (belief_type, session_id),
+                ).fetchone()
+            else:
+                row = db._conn.execute(
+                    "SELECT COUNT(DISTINCT session_id) FROM belief_traces "
+                    "WHERE belief_type=?",
+                    (belief_type,),
+                ).fetchone()
+            if row and row[0] >= 1:
+                return "cross_session"
+        except Exception:
+            pass
+
+        # Fallback: also check constraints table for tool-level blocks
         try:
             tool_names = detection.get("tool_names", [])
             for tool in tool_names:
@@ -327,7 +347,7 @@ def classify_failure(
     for modality in ("semantic", "operation", "knowledge"):
         if modality in detections:
             d = detections[modality]
-            history = _determine_history(modality, d, db)
+            history = _determine_history(modality, d, db, session_id)
             action = _determine_action(modality, history)
             injection = _generate_injection(modality, history, d)
 

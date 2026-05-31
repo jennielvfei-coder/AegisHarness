@@ -22,7 +22,7 @@ from typing import Optional
 
 import numpy as np
 
-from harness._utils import cosine_sim as _cosine_similarity  # shared implementation
+from _utils import cosine_sim as _cosine_similarity  # shared implementation
 
 from encoder import encode_cached, text_hash
 

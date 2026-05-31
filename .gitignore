@@ -38,6 +38,19 @@ __pycache__/
 .idea/
 .vscode/
 
+# Runtime data
+harness/state.db
+harness/latest_session.jsonl
+*.constraint_cache.json
+.daily_brief.md
+.feishu_doc_cache.json
+
+# Code intelligence index
+.codegraph/
+
+# IDE (alternative)
+.cursor/
+
 # OS
 .DS_Store
 Thumbs.db

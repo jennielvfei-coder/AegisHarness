@@ -35,6 +35,7 @@ class ObservationReport:
     skills_used: list[str] = field(default_factory=list)  # harness skill names used this session
     constraint_candidates: list[dict] = field(default_factory=list)  # recurring failures → constraints
     decision_trajectory: list[dict] = field(default_factory=list)  # key turning points
+    conflicts: list[dict] = field(default_factory=list)  # PreThink vs Observer disagreements
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
@@ -467,11 +468,33 @@ def analyze_session(
 
     # ── PreThink gate: routine sessions bypass all signal computation ──
     if situational_model is not None and situational_model.situation == "routine":
+        # Compute cheap signals to estimate what Observer would have done.
+        # Makes the override visible without changing behavior.
+        tool_count = _count_tool_calls(content)
+        content_len = len(content)
+        threshold = obs_config.get("min_tool_calls_for_skill", 3)
+        content_threshold = obs_config.get("min_content_length_for_skill", 1200)
+
+        conflicts = []
+        if tool_count >= threshold or content_len >= content_threshold:
+            observer_would = "create_skill" if tool_count >= threshold else "save_fragment"
+            conflicts.append({
+                "type": "prethink_gate_override",
+                "prethink": "routine",
+                "observer_would_have": observer_would,
+                "description": (
+                    f"PreThink gated as routine (conf={situational_model.confidence:.2f}) "
+                    f"but session has tool_calls={tool_count}, content_len={content_len}. "
+                    f"Without gate, Observer would have evaluated (threshold: "
+                    f"{threshold} tool calls or {content_threshold} chars)."
+                ),
+            })
+
         return ObservationReport(
             session_id=f"session_{datetime.now().strftime('%Y%m%d%H%M%S')}",
             action="skip", confidence=situational_model.confidence,
             reason=f"PreThink: routine session — {situational_model.reasoning_path}",
-            summary="", tags=[],
+            summary="", tags=[], conflicts=conflicts,
         )
 
     # Compute statistics
