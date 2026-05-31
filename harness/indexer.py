@@ -287,6 +287,20 @@ CREATE TABLE IF NOT EXISTS judgment_status_log (
     FOREIGN KEY (entry_id) REFERENCES judgment_entries(entry_id)
 );
 
+CREATE TABLE IF NOT EXISTS cross_day_discoveries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_date TEXT NOT NULL,
+    today_snippet_id INTEGER,
+    history_snippet_id INTEGER,
+    history_date TEXT,
+    shared_entities TEXT,
+    jaccard REAL,
+    rarity REAL,
+    cross_section REAL DEFAULT 1.0,
+    created_at REAL NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_cross_day_run_date ON cross_day_discoveries(run_date);
+
 CREATE TABLE IF NOT EXISTS news_attention_injections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     date TEXT NOT NULL,
@@ -332,6 +346,7 @@ CREATE TABLE IF NOT EXISTS hypotheses (
     status TEXT DEFAULT 'seeded',
     iteration_count INTEGER DEFAULT 0,
     causal_chain TEXT,
+    source TEXT DEFAULT 'template',
     created_at REAL NOT NULL DEFAULT (unixepoch()),
     last_evaluated REAL
 );
@@ -568,6 +583,7 @@ CREATE TABLE IF NOT EXISTS hypotheses (
     status TEXT DEFAULT 'seeded',
     iteration_count INTEGER DEFAULT 0,
     causal_chain TEXT,
+    source TEXT DEFAULT 'template',
     created_at REAL NOT NULL DEFAULT (unixepoch()),
     last_evaluated REAL
 );
@@ -1038,6 +1054,58 @@ class HarnessDB:
                     "sources": json.loads(row[6]) if row[6] else [],
                     "source_rating": row[7], "content_hash": row[8],
                     "embedding": json.loads(row[9]) if row[9] else None,
+                }
+                for row in cur.fetchall()
+            ]
+
+    def save_cross_day_discovery(self, run_date: str, today_snippet_id: int,
+                                  history_snippet_id: int, history_date: str,
+                                  shared_entities: list[str], jaccard: float,
+                                  rarity: float, cross_section: float = 1.0) -> int:
+        """Save a single cross-day entity correlation discovery."""
+        with self._lock:
+            cur = self._conn.execute(
+                """INSERT INTO cross_day_discoveries
+                   (run_date, today_snippet_id, history_snippet_id, history_date,
+                    shared_entities, jaccard, rarity, cross_section)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (run_date, today_snippet_id, history_snippet_id, history_date,
+                 json.dumps(shared_entities, ensure_ascii=False),
+                 jaccard, rarity, cross_section),
+            )
+            self._conn.commit()
+            return cur.lastrowid
+
+    def get_cross_day_discoveries(self, run_date: str | None = None,
+                                    limit: int = 20) -> list[dict]:
+        """Retrieve cross-day discoveries, optionally filtered by run_date."""
+        with self._lock:
+            if run_date:
+                cur = self._conn.execute(
+                    """SELECT id, run_date, today_snippet_id, history_snippet_id,
+                              history_date, shared_entities, jaccard, rarity,
+                              cross_section
+                       FROM cross_day_discoveries WHERE run_date = ?
+                       ORDER BY rarity DESC LIMIT ?""",
+                    (run_date, limit),
+                )
+            else:
+                cur = self._conn.execute(
+                    """SELECT id, run_date, today_snippet_id, history_snippet_id,
+                              history_date, shared_entities, jaccard, rarity,
+                              cross_section
+                       FROM cross_day_discoveries
+                       ORDER BY run_date DESC, rarity DESC LIMIT ?""",
+                    (limit,),
+                )
+            return [
+                {
+                    "id": row[0], "run_date": row[1],
+                    "today_snippet_id": row[2], "history_snippet_id": row[3],
+                    "history_date": row[4],
+                    "shared_entities": json.loads(row[5]) if row[5] else [],
+                    "jaccard": row[6], "rarity": row[7],
+                    "cross_section": row[8],
                 }
                 for row in cur.fetchall()
             ]

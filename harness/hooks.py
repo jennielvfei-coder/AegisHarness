@@ -498,27 +498,70 @@ def news_detect(message: str = ""):
 
 # ── CLI dispatch ──
 
+def _parse_args(raw_args: list[str]):
+    """Parse hook arguments — supports multiple Claude Code arg formats.
+
+    Format 1 (single JSON): $ARGUMENTS → {"tool_name":"...", "tool_input":"..."}
+    Format 2 (separate args): $TOOL "$ARGUMENTS" → tool_name, json_string
+    Format 3 (positional): python hooks.py pre-tool <tool> <input>
+    """
+    result = {}
+    if not raw_args:
+        return result
+
+    # Format 1: single JSON string (legacy $ARGUMENTS)
+    if len(raw_args) == 1 and raw_args[0]:
+        try:
+            data = json.loads(raw_args[0])
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Format 2: separate $TOOL and "$ARGUMENTS" (and optionally "$OUTPUT")
+    # raw_args[0] = tool_name from $TOOL
+    # raw_args[1] = JSON string from "$ARGUMENTS"
+    # raw_args[2] = output from "$OUTPUT" (post-tool only)
+    if len(raw_args) >= 1 and raw_args[0]:
+        result["tool_name"] = raw_args[0]
+    if len(raw_args) >= 2 and raw_args[1]:
+        try:
+            data = json.loads(raw_args[1])
+            if isinstance(data, dict):
+                result["tool_input"] = data.get("tool_input", data.get("command", raw_args[1]))
+        except (json.JSONDecodeError, TypeError):
+            result["tool_input"] = raw_args[1]
+    if len(raw_args) >= 3 and raw_args[2]:
+        result["tool_output"] = raw_args[2]
+    return result
+
+
 def main():
     if len(sys.argv) < 2:
         return
 
     action = sys.argv[1]
+    raw = sys.argv[2:]
 
     try:
         if action == "pre-tool":
-            tool = sys.argv[2] if len(sys.argv) > 2 else ""
-            inp = sys.argv[3] if len(sys.argv) > 3 else ""
+            parsed = _parse_args(raw)
+            tool = parsed.get("tool_name", raw[0] if len(raw) > 0 else "")
+            inp = parsed.get("tool_input", raw[1] if len(raw) > 1 else "")
             pre_tool_use(tool, inp)
         elif action == "post-tool":
-            tool = sys.argv[2] if len(sys.argv) > 2 else ""
-            inp = sys.argv[3] if len(sys.argv) > 3 else ""
-            out = sys.argv[4] if len(sys.argv) > 4 else ""
+            parsed = _parse_args(raw)
+            tool = parsed.get("tool_name", raw[0] if len(raw) > 0 else "")
+            inp = parsed.get("tool_input", raw[1] if len(raw) > 1 else "")
+            out = parsed.get("tool_output", raw[2] if len(raw) > 2 else "")
             post_tool_use(tool, inp, out)
         elif action == "user-msg":
-            msg = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else ""
+            parsed = _parse_args(raw)
+            msg = parsed.get("message", " ".join(raw) if raw else "")
             user_prompt_submit(msg)
         elif action == "news-detect":
-            msg = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else ""
+            parsed = _parse_args(raw)
+            msg = parsed.get("message", " ".join(raw) if raw else "")
             news_detect(msg)
     except Exception as e:
         _log_err("hooks.main", e, {"action": action})

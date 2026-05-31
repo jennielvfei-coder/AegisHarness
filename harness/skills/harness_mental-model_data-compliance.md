@@ -1,87 +1,67 @@
 ```markdown
 ---
-name: harness-state-diagnosis
-description: 快速诊断Harness系统运行状态与错误累积情况（基于状态数据库的标准化查询模式）
-tags: [data-compliance, news-workflow, ai-governance, diagnostics, prethink:exploration]
+name: proactive-config-audit
+description: 系统化审计项目配置健康状态的四阶段检查模式：记忆→代码变更→配置文件→运行时状态，在问题触发之前发现缺口
+tags: [data-compliance, ai-governance, news-workflow, prethink:exploration]
 triggers:
-  - "我的harness现在运行如何了"
-  - "积累了多少错误"
-  - "检查harness健康状况"
-  - "harness health check"
-  - "harness state summary"
+  - session 启动时的 harness 健康检查
+  - 配置变更后的完整性验证
+  - 排查 "为什么某功能不工作" 时
+  - 用户要求 "检查项目状态" 或类似模糊指令
 version: 1
-harness_confidence: 0.92
+harness_confidence: 0.85
 ---
 
-# Harness 状态诊断
+# 主动配置审计模式 (Proactive Configuration Audit)
 
 ## 执行逻辑
+
 ### When to Use
-当用户询问 Harness 的运行状态、错误数量、累积趋势或整体健康度时，使用此诊断模式。
+- Session 开始，尚未明确任务时，自动触发健康检查
+- 刚完成一组修改，需要验证副作用
+- 遇到模糊的 "不工作" 信号，需要系统化定位缺口
+- 项目处于快速迭代期，配置漂移风险高
 
-### Step-by-Step
-1. **定位状态数据库**  
-   默认路径：`harness/state.db`（若不存在，说明 Harness 未启动或路径错误）。
+### Step-by-Step（四阶段递进）
 
-2. **建立只读连接并获取表结构（首次）**  
-   执行 `PRAGMA table_info(<table>)` 确认关键表存在：
-   - `judgment_entries`：判决历史
-   - `feature_activations`：特征激活记录
-   - `signal_buffer`：信号缓冲
-   - `hypotheses`：假设记录
+**Phase 1: 读取记忆中的已知问题**
+- 读取 MEMORY.md 或等效知识库文件
+- 列出所有已记录的失败模式、配置缺陷、架构矛盾
+- 目标：避免重复踩坑，带着 "已知坏味道清单" 进入后续阶段
 
-3. **查询总体判决健康度**  
-   ```sql
-   SELECT COUNT(*), AVG(CAST(json_extract(payload, '$.confidence') AS REAL))
-   FROM judgment_entries;
-   ```
-   置信度均值低于阈值（如 0.5）或数量骤降为异常信号。
+**Phase 2: 审计代码变更面**
+- `git diff --stat` 获取变更文件概览
+- `git diff` 查看具体改动内容
+- 判断：这些改动是否会引入新的配置依赖？是否可能破坏现有的 hooks/settings？
 
-4. **统计错误/失败相关信号与激活**  
-   - 特征激活：
-     ```sql
-     SELECT COUNT(*) FROM feature_activations
-     WHERE json_extract(payload, '$.type') LIKE '%error%'
-        OR json_extract(payload, '$.type') LIKE '%fail%';
-     ```
-   - 信号缓冲：
-     ```sql
-     SELECT COUNT(*) FROM signal_buffer
-     WHERE json_extract(payload, '$.signal_type') LIKE '%error%'
-        OR json_extract(payload, '$.signal_type') LIKE '%fail%';
-     ```
-   这两个数字给出直接错误量级。
+**Phase 3: 配置文件交叉验证**
+- 读取 `settings.local.json`（或等效本地配置）
+- 读取 `settings.json`（或等效默认配置模板）
+- 检查关键字段是否存在：hooks、skipWebFetchPreflight、MCP 配置等
+- 核心判断：**"应该有但实际没有的配置项"**——这是最高优先级的缺口
+- 如果默认配置模板本身不存在，这也是一个需要报告的缺口
 
-5. **检查活跃假设**  
-   ```sql
-   SELECT hypothesis_id, status, json_extract(payload, '$.description')
-   FROM hypotheses;
-   ```
-   观察是否存在大量未解决或失败假设。
-
-6. **获取近期判决趋势**  
-   ```sql
-   SELECT entry_id, json_extract(payload, '$.category'), json_extract(payload, '$.confidence')
-   FROM judgment_entries
-   ORDER BY entry_id DESC LIMIT 10;
-   ```
-   若最近条目中错误类别占比高，表明系统正在经历异常。
-
-7. **汇总并报告**  
-   给出错误总数、置信度趋势、未解决假设数量以及是否需要干预的建议。
+**Phase 4: 运行时包/依赖验证**
+- 检查关键包的目录结构是否完整（如 `duonews/**/*.py`）
+- 验证包是否可导入、是否有语法错误
+- 检查测试是否通过（如果有测试套件）
 
 ### How to Verify
-- 确认 `state.db` 文件存在且可读。
-- 所有查询返回有效数值，无 SQL 错误。
-- 若表不存在或为空，返回明确的“无数据”提示，而非报错。
+- Phase 1 输出：已知问题的 checklist（逐项确认是否已修复/仍存在）
+- Phase 3 关键信号：某个被文档/代码引用但配置文件中不存在的字段 → 立即报告
+- Phase 4 关键信号：包存在但无法导入，或目录为空 → 立即报告
+- 所有阶段完成且无新缺口发现 → 审计通过
 
 ## 异常处理
+
 ### Edge Cases
-- **路径分隔符问题**：在 Windows 的使用 `python "harness/harness_daemon.py" analyze 2>&1` 等命令时，确保使用正斜杠并加双引号，避免反斜杠转义导致的 `Errno 2`。  
-- **数据库锁定**：连接时使用 `mode=ro` 或先复制一份临时文件再查询。  
-- **大表性能**：若数据量极大，添加 `LIMIT` 或使用聚合函数避免全扫描。  
-- **空表**：明确报告“当前无记录”，避免除以零等错误。
+- **settings.json 缺失但 settings.local.json 存在**：这是常见模式，但如果 hooks/MCP 配置只在 settings.json 中定义，则本地覆盖文件会缺少这些字段。需检查两文件之间的字段覆盖率
+- **git 仓库不是干净的**：Phase 2 的 diff 如果有未提交修改，需区分是本次 session 的修改还是遗留的脏状态
+- **大项目配置分散**：配置可能在 `.claude/`、`pyproject.toml`、环境变量等多处，需根据项目约定扩展 Phase 3 的文件列表
 
 ### Fallback
-若 `state.db` 不存在，且无法通过 daemon 的 `analyze` 命令获取聚合统计，则告知用户 Harness 可能未启动，并建议先检查进程状态或启动 daemon。
+- 如果 MEMORY.md 不存在：跳过 Phase 1，从 Phase 2 开始
+- 如果 git 不可用：跳过 Phase 2，直接进入 Phase 3
+- 如果 settings.local.json 不存在：报告为高优先级缺口，因为这是大多数 harness 功能的基础依赖
+- 四阶段全部无法执行 → 降级为"该项目无已知配置模式，需手动探索"
 ```

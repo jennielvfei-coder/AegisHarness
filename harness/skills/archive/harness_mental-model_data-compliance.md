@@ -1,73 +1,87 @@
 ```markdown
 ---
-name: harness-self-audit
-description: 对 AI governance 系统做全状态审计，识别文档-实现鸿沟、方案内部矛盾、和隐性依赖
-tags: [data-compliance, ai-governance, news-workflow]
+name: harness-state-diagnosis
+description: 快速诊断Harness系统运行状态与错误累积情况（基于状态数据库的标准化查询模式）
+tags: [data-compliance, news-workflow, ai-governance, diagnostics, prethink:exploration]
 triggers:
-  - "harness 还需要什么"
-  - "评估 harness 当前状态"
-  - "审查 governance 体系"
-  - "系统有哪些缺口"
+  - "我的harness现在运行如何了"
+  - "积累了多少错误"
+  - "检查harness健康状况"
+  - "harness health check"
+  - "harness state summary"
 version: 1
-harness_confidence: 0.85
+harness_confidence: 0.92
 ---
 
-# Harness 自审计审计
+# Harness 状态诊断
 
 ## 执行逻辑
-
 ### When to Use
-当需要对 AI governance/harness 系统进行整体状态评估——不是修某个 bug，而是退一步看清：现有记忆的主题分布、文档和代码之间的鸿沟、被忽略的隐性依赖。
+当用户询问 Harness 的运行状态、错误数量、累积趋势或整体健康度时，使用此诊断模式。
 
 ### Step-by-Step
+1. **定位状态数据库**  
+   默认路径：`harness/state.db`（若不存在，说明 Harness 未启动或路径错误）。
 
-**第一步：全状态读取**
-必须并行读取三类数据源：
-- **记忆文件**（memory/*.md）——已沉淀的知识
-- **Harness 代码**（injector / observer / daemon）——实际运行的逻辑
-- **配置文件**（yaml / 数据库 schema）——声明式状态
-- **最近提交历史**——演进轨迹
+2. **建立只读连接并获取表结构（首次）**  
+   执行 `PRAGMA table_info(<table>)` 确认关键表存在：
+   - `judgment_entries`：判决历史
+   - `feature_activations`：特征激活记录
+   - `signal_buffer`：信号缓冲
+   - `hypotheses`：假设记录
 
-**第二步：主题聚类**
-将记忆/配置/代码按主题分桶，识别：
-- 哪些属于环境修复（一次性修复，不会再犯）
-- 哪些属于架构需求（反复出现的模式）
-- 哪些属于工作流需求（特定任务的自动化）
+3. **查询总体判决健康度**  
+   ```sql
+   SELECT COUNT(*), AVG(CAST(json_extract(payload, '$.confidence') AS REAL))
+   FROM judgment_entries;
+   ```
+   置信度均值低于阈值（如 0.5）或数量骤降为异常信号。
 
-这一步输出**记忆地图**而非列表。
+4. **统计错误/失败相关信号与激活**  
+   - 特征激活：
+     ```sql
+     SELECT COUNT(*) FROM feature_activations
+     WHERE json_extract(payload, '$.type') LIKE '%error%'
+        OR json_extract(payload, '$.type') LIKE '%fail%';
+     ```
+   - 信号缓冲：
+     ```sql
+     SELECT COUNT(*) FROM signal_buffer
+     WHERE json_extract(payload, '$.signal_type') LIKE '%error%'
+        OR json_extract(payload, '$.signal_type') LIKE '%fail%';
+     ```
+   这两个数字给出直接错误量级。
 
-**第三步：识别三类鸿沟**
+5. **检查活跃假设**  
+   ```sql
+   SELECT hypothesis_id, status, json_extract(payload, '$.description')
+   FROM hypotheses;
+   ```
+   观察是否存在大量未解决或失败假设。
 
-| 鸿沟类型 | 检测方式 | 例子 |
-|----------|----------|------|
-| 文档-实现鸿沟 | config/schema 中有定义，但代码中无对应执行路径 | `preflight_check` fragment type 建了列，但没有代码执行它 |
-| 能力-守护鸿沟 | 修复已落地，但没有机制阻止复发 | 绕过了 `mcp_wrapper.py`，但没有检查来防止下次构建时重新引入 |
-| 显性-隐性鸿沟 | 方案中直接写的依赖，但在优先级排序中被忽略 | P0 preflight 最有价值的检查依赖 P2 跨 session 数据 |
+6. **获取近期判决趋势**  
+   ```sql
+   SELECT entry_id, json_extract(payload, '$.category'), json_extract(payload, '$.confidence')
+   FROM judgment_entries
+   ORDER BY entry_id DESC LIMIT 10;
+   ```
+   若最近条目中错误类别占比高，表明系统正在经历异常。
 
-**第四步：检查方案自相矛盾**
-在提出改进建议前，先审视每个方案：
-- 是否在解决 A 的同时加重了 B？（例如：解决 context 膨胀的方案是注入更多 context）
-- 是否方案 X 和方案 Y 在抢同一个资源？
-- 是否 P0 实际依赖 P2 才能生效？
-
-**第五步：输出缺口优先级**
-按依赖关系排序，而非按严重程度排序：
-1. 阻塞性依赖（P0 依赖的 P2 先做）
-2. 独立可交付的修复
-3. 架构重构（最晚，因为需要更多上下文稳定）
+7. **汇总并报告**  
+   给出错误总数、置信度趋势、未解决假设数量以及是否需要干预的建议。
 
 ### How to Verify
-- 每个识别出的鸿沟都能指出具体文件和行号（或配置键）
-- 每个方案矛盾都能用一句话描述冲突
-- 优先级排序包含依赖链解释
+- 确认 `state.db` 文件存在且可读。
+- 所有查询返回有效数值，无 SQL 错误。
+- 若表不存在或为空，返回明确的“无数据”提示，而非报错。
 
 ## 异常处理
-
 ### Edge Cases
-- **记忆过少**（<5条）：缺乏聚类价值，转而检查"为什么记忆没沉淀"——可能是 observer 信号路由问题
-- **代码和记忆完全一致**：无鸿沟，转而检查"是否过度拟合已知问题，忽略了新出现的模式"
-- **方案无矛盾**：可能是分析不够深入，再问"这个方案假设什么前提条件？这些条件都满足吗？"
+- **路径分隔符问题**：在 Windows 的使用 `python "harness/harness_daemon.py" analyze 2>&1` 等命令时，确保使用正斜杠并加双引号，避免反斜杠转义导致的 `Errno 2`。  
+- **数据库锁定**：连接时使用 `mode=ro` 或先复制一份临时文件再查询。  
+- **大表性能**：若数据量极大，添加 `LIMIT` 或使用聚合函数避免全扫描。  
+- **空表**：明确报告“当前无记录”，避免除以零等错误。
 
 ### Fallback
-如果无法完成全状态读取（文件缺失、权限问题），至少输出"已知未知"清单——标记哪些数据源没读到，以及这对审计结论可靠性的影响。
+若 `state.db` 不存在，且无法通过 daemon 的 `analyze` 命令获取聚合统计，则告知用户 Harness 可能未启动，并建议先检查进程状态或启动 daemon。
 ```

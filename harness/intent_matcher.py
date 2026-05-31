@@ -22,7 +22,7 @@ from pathlib import Path
 def _load_intents():
     """Lazy-load intents from shared config so import never fails at module level."""
     try:
-        from harness.news_agent.config import build_intents_registry
+        from duonews.config import build_intents_registry
         return build_intents_registry()
     except Exception:
         # Fallback: minimal built-in registry (cold start / import error)
@@ -31,7 +31,7 @@ def _load_intents():
                 "keywords": {"新闻": 10, "日报": 10, "简报": 8},
                 "domain_keywords": {"AI": {"weight": 8, "domains": ["ai"]}},
                 "min_score": 10,
-                "skill": "harness_news-agent",
+                "skill": "duonews",
                 "workflow_params": {"source_priority": {}},
             },
         }
@@ -206,7 +206,7 @@ def _format_preference_context(prefs: dict | None) -> str:
 def _pick_domain_instruction(domains: list[str]) -> str:
     """Pick the best domain instruction from shared config."""
     try:
-        from harness.news_agent.config import NEWS_DOMAIN_INSTRUCTIONS, NEWS_DOMAIN_DEFAULT_INSTRUCTION
+        from duonews.config import NEWS_DOMAIN_INSTRUCTIONS, NEWS_DOMAIN_DEFAULT_INSTRUCTION
     except Exception:
         return "**领域指令：** 全领域覆盖，标准日报模板。"
 
@@ -284,10 +284,10 @@ def inject_workflow_context(intent_result: dict, source_health: dict | None = No
         lines.append("")
         lines.append("---")
         lines.append("")
-        lines.append("**执行指令：** 使用 `Skill` 工具调用 `harness_news-agent` 技能。")
-        lines.append("统一入口：`python -m harness.news_agent --step <name> --date <date>`")
-        lines.append("可用步骤：search | arxiv | preprocess | cross_day | push | vectorize | feedback | diagnose | all")
-        lines.append("**格式权威源：** `news-template.md` (v3.2)")
+        lines.append("**执行指令：** 使用 `Skill` 工具调用 `duonews` 技能。")
+        lines.append("统一入口：`python -m duonews --step <name> --date <date>`")
+        lines.append("可用步骤：github | search | arxiv | preprocess | cross_day | push | vectorize | feedback | diagnose | all")
+        lines.append("**格式权威源：** `news-template.md` (v3.3)")
 
     return "\n".join(lines)
 

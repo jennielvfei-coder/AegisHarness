@@ -56,6 +56,16 @@ class Prediction:
 
 
 @dataclass
+class ActionRecommendation:
+    """A concrete, machine-consumable action recommendation derived from system state."""
+    priority: str          # 'critical' | 'warning' | 'info'
+    mode: str              # 'deep_diagnosis' | 'cautious_execution' | 'review' | 'routine'
+    summary: str           # one-line Chinese summary for context injection
+    commands: list[str] = field(default_factory=list)  # CLI commands the user can run
+    reasons: list[str] = field(default_factory=list)   # signals that triggered this recommendation
+
+
+@dataclass
 class SelfModel:
     version: int = 1
     timestamp: float = field(default_factory=time.time)
@@ -63,6 +73,8 @@ class SelfModel:
     constraints: ConstraintSummary = field(default_factory=ConstraintSummary)
     health: HealthDigest = field(default_factory=HealthDigest)
     predictions: list[Prediction] = field(default_factory=list)
+    system_risk_level: int = 0           # 0-100, computed from all health signals
+    recommendations: list[ActionRecommendation] = field(default_factory=list)
 
 
 # ── Paths ────────────────────────────────────────────────────────────────
@@ -97,13 +109,164 @@ def build_from_state(db_path: Path) -> SelfModel:
     except Exception:
         pass
 
-    return SelfModel(
+    sm = SelfModel(
         version=1,
         timestamp=time.time(),
         skills=skills,
         constraints=constraints,
         health=health,
     )
+
+    # ── Compute derived fields: risk level + recommendations ──
+    sm.system_risk_level, risk_reasons = _compute_system_risk_level(sm)
+    sm.recommendations = _generate_recommendations(sm, sm.system_risk_level, risk_reasons)
+
+    return sm
+
+
+# ── Risk computation ──────────────────────────────────────────────────────
+
+def _compute_system_risk_level(sm: SelfModel) -> tuple[int, list[str]]:
+    """Compute system risk level (0-100) from all health signals.
+
+    Pure rule-based. No LLM. Designed to be a "fast variable" that prethink
+    can read at init time to decide whether to boost base risk scores.
+
+    Returns (risk_level, reasons_list).
+    """
+    risk = 0
+    reasons: list[str] = []
+
+    # ── Skill health signals ──
+    degraded_count = sum(1 for s in sm.skills if s.status == "degraded")
+    idle_count = sum(1 for s in sm.skills if s.status == "idle")
+    pending_count = sum(1 for s in sm.skills if s.status == "pending_review")
+
+    if degraded_count > 0:
+        risk += degraded_count * 15
+        reasons.append(f"{degraded_count}个技能降级")
+    if idle_count > 0:
+        risk += idle_count * 5
+        reasons.append(f"{idle_count}个技能闲置")
+    if pending_count > 0:
+        risk += pending_count * 3
+        reasons.append(f"{pending_count}个技能待审查")
+
+    # Low average confidence across skills
+    confidences = [s.confidence for s in sm.skills if s.confidence > 0]
+    if confidences:
+        avg_conf = sum(confidences) / len(confidences)
+        if avg_conf < 0.5:
+            risk += int((0.5 - avg_conf) * 60)
+            reasons.append(f"技能平均有效性{avg_conf:.0%}")
+
+    # ── Constraint precision signals ──
+    if sm.constraints.active_count > 0 and sm.constraints.precision < 0.5:
+        risk += int((0.5 - sm.constraints.precision) * 60)
+        reasons.append(f"约束精度{sm.constraints.precision:.0%}")
+    if sm.constraints.total_violations > 10:
+        risk += min(sm.constraints.total_violations // 5, 20)
+        reasons.append(f"约束违反{sm.constraints.total_violations}次")
+
+    # ── Health signals ──
+    if sm.health.status == "degraded":
+        risk += 20
+        reasons.append("健康状态降级")
+    elif sm.health.status == "critical":
+        risk += 40
+        reasons.append("健康状态危急")
+
+    if sm.health.alert_count > 0:
+        risk += min(sm.health.alert_count * 8, 25)
+        reasons.append(f"{sm.health.alert_count}条健康告警")
+
+    # ── Probe latency ──
+    if sm.health.probe_latency_ms > 500:
+        risk += 10
+        reasons.append(f"探针延迟{sm.health.probe_latency_ms:.0f}ms")
+
+    return min(risk, 100), reasons
+
+
+def _generate_recommendations(
+    sm: SelfModel, risk_level: int, reasons: list[str]
+) -> list[ActionRecommendation]:
+    """Generate concrete, actionable recommendations from system state.
+
+    Rules are ordered: first matching rule wins for the mode recommendation.
+    Specific per-signal recommendations are additive.
+    """
+    recs: list[ActionRecommendation] = []
+
+    # ── Primary mode recommendation (based on risk level) ──
+    if risk_level >= 50:
+        recs.append(ActionRecommendation(
+            priority="critical",
+            mode="deep_diagnosis",
+            summary=f"[建议: 深度诊断] {', '.join(reasons)}。",
+            commands=["python harness_daemon.py review --check-health"],
+            reasons=reasons,
+        ))
+    elif risk_level >= 25:
+        recs.append(ActionRecommendation(
+            priority="warning",
+            mode="cautious_execution",
+            summary=f"[建议: 谨慎执行] {', '.join(reasons)}。",
+            commands=[],
+            reasons=reasons,
+        ))
+    else:
+        recs.append(ActionRecommendation(
+            priority="info",
+            mode="routine",
+            summary="系统状态正常，快速执行模式。",
+            commands=[],
+            reasons=[],
+        ))
+
+    # ── Specific per-signal recommendations (additive) ──
+    degraded_skills = [s for s in sm.skills if s.status == "degraded"]
+    if degraded_skills:
+        names = ", ".join(s.name for s in degraded_skills)
+        recs.append(ActionRecommendation(
+            priority="warning",
+            mode="review",
+            summary=f"降级技能: {names}",
+            commands=["python harness_daemon.py review"],
+            reasons=[f"{s.name} confidence={s.confidence:.0%}" for s in degraded_skills],
+        ))
+
+    idle_skills = [s for s in sm.skills if s.status == "idle" and s.last_used_days
+                   and s.last_used_days > 14]
+    if idle_skills:
+        names = ", ".join(f"{s.name}({s.last_used_days:.0f}d)" for s in idle_skills)
+        recs.append(ActionRecommendation(
+            priority="info",
+            mode="review",
+            summary=f"长期闲置技能: {names}",
+            commands=["python harness_daemon.py review"],
+            reasons=[f"闲置>14天"],
+        ))
+
+    if sm.constraints.precision < 0.4 and sm.constraints.active_count > 0:
+        recs.append(ActionRecommendation(
+            priority="warning",
+            mode="review",
+            summary=f"约束精度过低({sm.constraints.precision:.0%})，建议审查约束规则。",
+            commands=["python harness_daemon.py review"],
+            reasons=[f"constraint precision={sm.constraints.precision:.3f}"],
+        ))
+
+    if sm.health.status == "critical":
+        recs.append(ActionRecommendation(
+            priority="critical",
+            mode="deep_diagnosis",
+            summary=f"健康状态危急: {', '.join(sm.health.top_alerts[:2])}",
+            commands=["python harness_daemon.py diagnose"],
+            reasons=sm.health.top_alerts[:2],
+        ))
+
+    return recs
 
 
 def _build_skills(conn: sqlite3.Connection) -> list[SkillEntry]:
@@ -305,13 +468,28 @@ def _format_trend_arrow(current: float, baseline: float) -> str:
 def render_snapshot(self_model: SelfModel) -> tuple[str, list[str]]:
     """Render a compact self-portrait for context injection.
 
-    Target: <=10 lines. Priority 0.92 (above constraints at 0.90).
+    Target: <=12 lines (was 10, +2 for recommendations).
+    Priority 0.92 (above constraints at 0.90).
     Returns (header, lines) tuple for InjectorOutput.add().
 
     Never raises — returns fallback on any error.
     """
     try:
         lines: list[str] = []
+
+        # ── Recommendation line (FIRST — most actionable) ──
+        if self_model.recommendations:
+            primary = self_model.recommendations[0]
+            lines.append(f"**{primary.summary}**")
+            # Commands if present
+            if primary.commands:
+                lines.append(f"  `{' | '.join(primary.commands)}`")
+
+        # ── Risk bar ──
+        risk = self_model.system_risk_level
+        bar = "█" * (risk // 10) + "░" * (10 - risk // 10)
+        risk_label = "CRITICAL" if risk >= 50 else ("WARNING" if risk >= 25 else "NORMAL")
+        lines.append(f"System risk: [{bar}] {risk}% {risk_label}")
 
         # ── Skills line ──
         status_counts: dict[str, int] = {}
@@ -345,8 +523,13 @@ def render_snapshot(self_model: SelfModel) -> tuple[str, list[str]]:
             health_str += f" · {h.alert_count} alerts"
         lines.append(health_str)
 
-        # ── Warnings (max 4) ──
+        # ── Warnings (max 6) ──
         warnings: list[str] = []
+
+        # Secondary recommendations (beyond the primary)
+        for rec in self_model.recommendations[1:3]:
+            prefix = {"critical": "CRIT", "warning": "WARN", "info": "INFO"}.get(rec.priority, "")
+            warnings.append(f"  [{prefix}] {rec.summary}")
 
         # Idle skills approaching archive
         for s in self_model.skills:
@@ -374,11 +557,11 @@ def render_snapshot(self_model: SelfModel) -> tuple[str, list[str]]:
             warnings.append(f"  [{prefix}] {p.message[:100]}")
 
         # Add warnings with prefix
-        for i, w in enumerate(warnings[:5]):
+        for i, w in enumerate(warnings[:6]):
             prefix = "  " if w.startswith("  ") else "  "
             lines.append(f"{prefix}{w.strip()}")
 
-        return ("## Self", lines[:10])
+        return ("## Self", lines[:12])
 
     except Exception:
         return ("## Self", ["SelfModel render error — check harness state."])
@@ -391,6 +574,7 @@ def _serialize(model: SelfModel) -> dict:
     return {
         "version": model.version,
         "timestamp": model.timestamp,
+        "system_risk_level": model.system_risk_level,
         "skills": [
             {
                 "name": s.name, "status": s.status, "description": s.description,
@@ -416,6 +600,14 @@ def _serialize(model: SelfModel) -> dict:
                 "message": p.message, "timestamp": p.timestamp,
             }
             for p in model.predictions
+        ],
+        "recommendations": [
+            {
+                "priority": r.priority, "mode": r.mode,
+                "summary": r.summary, "commands": r.commands,
+                "reasons": r.reasons,
+            }
+            for r in model.recommendations
         ],
     }
 

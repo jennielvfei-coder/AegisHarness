@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "timestamp": 1780228662.7032104,
+  "system_risk_level": 67,
+  "skills": [
+    {
+      "name": "harness_env-fix_ai-governance",
+      "status": "active",
+      "description": "",
+      "confidence": 0.6,
+      "usage_count": 0,
+      "last_used_days": null,
+      "idle_days": 0.3
+    },
+    {
+      "name": "harness_env-fix_data-compliance",
+      "status": "active",
+      "description": "",
+      "confidence": 0.6,
+      "usage_count": 0,
+      "last_used_days": null,
+      "idle_days": 0.3
+    },
+    {
+      "name": "harness_env-fix_news-workflow",
+      "status": "pending_review",
+      "description": "",
+      "confidence": 0.5,
+      "usage_count": 0,
+      "last_used_days": null,
+      "idle_days": null
+    },
+    {
+      "name": "harness_mental-model_ai-governance",
+      "status": "pending_review",
+      "description": "",
+      "confidence": 0.5,
+      "usage_count": 0,
+      "last_used_days": null,
+      "idle_days": null
+    },
+    {
+      "name": "harness_mental-model_contract-review",
+      "status": "pending_review",
+      "description": "",
+      "confidence": 0.5,
+      "usage_count": 0,
+      "last_used_days": null,
+      "idle_days": null
+    },
+    {
+      "name": "harness_mental-model_data-compliance",
+      "status": "active",
+      "description": "",
+      "confidence": 0.6,
+      "usage_count": 0,
+      "last_used_days": null,
+      "idle_days": 0.3
+    },
+    {
+      "name": "harness_task-workflow_ai-governance",
+      "status": "active",
+      "description": "",
+      "confidence": 0.6,
+      "usage_count": 0,
+      "last_used_days": null,
+      "idle_days": 0.3
+    }
+  ],
+  "constraints": {
+    "active_count": 6,
+    "precision": 0.889,
+    "total_violations": 1
+  },
+  "health": {
+    "status": "critical",
+    "probe_latency_ms": 13000.0,
+    "alert_count": 1,
+    "top_alerts": [
+      "[CRIT] hook_latency: val=13000.00, trend=stable"
+    ]
+  },
+  "predictions": [],
+  "recommendations": [
+    {
+      "priority": "critical",
+      "mode": "deep_diagnosis",
+      "summary": "[建议: 深度诊断] 3个技能待审查, 健康状态危急, 1条健康告警, 探针延迟13000ms。",
+      "commands": [
+        "python harness_daemon.py review --check-health"
+      ],
+      "reasons": [
+        "3个技能待审查",
+        "健康状态危急",
+        "1条健康告警",
+        "探针延迟13000ms"
+      ]
+    },
+    {
+      "priority": "critical",
+      "mode": "deep_diagnosis",
+      "summary": "健康状态危急: [CRIT] hook_latency: val=13000.00, trend=stable",
+      "commands": [
+        "python harness_daemon.py diagnose"
+      ],
+      "reasons": [
+        "[CRIT] hook_latency: val=13000.00, trend=stable"
+      ]
+    }
+  ]
+}

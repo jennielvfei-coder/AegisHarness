@@ -100,6 +100,7 @@ class PrejudgeNode(Node):
             "recent_error_count": shared.get("recent_error_count", 0),
             "last_action": shared.get("last_action", ""),
             "tool_count": shared.get("tool_count", 0),
+            "system_risk_level": shared.get("system_risk_level", 0),
         }
 
     def exec(self, prep_res):
@@ -128,6 +129,20 @@ class PrejudgeNode(Node):
         if score == 0 and tool_count >= sw.get("multi_tool_threshold", 5):
             score = sw.get("multi_tool_bonus", 5)
             triggers.append("multi_tool:exploration")
+
+        # ── Global health boost: system_risk_level from SelfModel ──
+        # When the harness is globally degraded, even neutral messages
+        # should trigger deeper diagnosis rather than "routine" fast path.
+        srl = prep_res.get("system_risk_level", 0)
+        if srl >= 50:
+            score += 20
+            triggers.append(f"system_risk:critical({srl})")
+        elif srl >= 25:
+            score += 10
+            triggers.append(f"system_risk:warning({srl})")
+        elif srl >= 10:
+            score += 5
+            triggers.append(f"system_risk:elevated({srl})")
 
         if score == 0:
             tier = "routine"
@@ -366,7 +381,8 @@ class BudgetNode(Node):
 
 def run_prethink(user_message: str = "",
                  fingerprint: dict | None = None,
-                 db=None) -> SituationalModel:
+                 db=None,
+                 system_risk_level: int = 0) -> SituationalModel:
     """Run the PreThink graph and return a SituationalModel.
 
     Args:
@@ -375,6 +391,8 @@ def run_prethink(user_message: str = "",
                      recent_error_count, has_interruption, last_action.
                      Partial OK — missing keys default to 0/False.
         db: HarnessDB instance for anchor lookups (optional).
+        system_risk_level: 0-100 global health score from SelfModel.
+                           Higher → base risk score boosted → fewer "routine" classifications.
     """
     if fingerprint is None:
         fingerprint = {}
@@ -387,6 +405,7 @@ def run_prethink(user_message: str = "",
         "failure_count": fingerprint.get("failure_count", 0),
         "data_quality_failures": fingerprint.get("data_quality_failures", 0),
         "has_interruption": fingerprint.get("has_interruption", False),
+        "system_risk_level": system_risk_level,
         "db": db,
     }
 

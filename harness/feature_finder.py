@@ -302,6 +302,7 @@ def find_features(
     db,
     k: int = 15,
     feature_lib_entries: list | None = None,
+    attention_entities: list[str] | None = None,
 ) -> list[AnomalyFeature]:
     """Entity-grounded anomaly detection via 384-dim embedding clustering.
 
@@ -313,6 +314,12 @@ def find_features(
 
     This produces insights like "NVIDIA+中国+华为+H200 cluster persists 5 days"
     instead of "Feature E3 activated at p=5e-6".
+
+    Args:
+        attention_entities: Optional list of entity names that should receive
+            1.5x detection confidence boost when matched in a cluster.
+            Used for historical judgment injection — entities from yesterday's
+            headline judgment get higher attention today.
     """
     N = len(today_snippets)
     if N < 3:
@@ -362,6 +369,15 @@ def find_features(
         entity_score = min(len(entities) / 6.0, 1.0)
         confidence = 0.4 * size_score + 0.3 * entity_score + 0.3 * (1.0 if feature_matches else 0.3)
 
+        # Attention boost: entities from historical judgment get 1.5x weight
+        if attention_entities:
+            attention_set = {e.lower() for e in attention_entities}
+            cluster_entity_set = {e.lower() for e in entity_names}
+            attention_overlap = len(cluster_entity_set & attention_set)
+            if attention_overlap > 0:
+                boost = 1.0 + 0.5 * min(attention_overlap / max(len(attention_set), 1), 1.0)
+                confidence = min(confidence * boost, 1.0)
+
         # Keyword divergence: compare entity sets within vs outside cluster
         in_entities = set(entity_names)
         out_indices = [i for i in range(N) if i not in indices]
@@ -392,6 +408,85 @@ def find_features(
 
     anomalies.sort(key=lambda x: x.detection_confidence, reverse=True)
     return anomalies
+
+
+def find_features_multiwindow(
+    db,
+    date_str: str,
+    feature_lib_entries: list | None = None,
+    attention_entities: list[str] | None = None,
+) -> dict[str, list[AnomalyFeature]]:
+    """Multi-window anomaly detection across 1-day, 3-day, and 7-day windows.
+
+    Runs find_features() on three aggregation windows and labels signals:
+      - W1 (1-day): spike detection — today vs 30-day baseline
+      - W3 (3-day): accumulation detection — 3-day merge vs 30-day baseline
+      - W7 (7-day): secular trend detection — 7-day merge vs 30-day baseline
+
+    Returns:
+        {"spike": [...], "accumulation": [...], "secular_trend": [...]}
+        where each list contains AnomalyFeature objects tagged by window.
+    """
+    from datetime import datetime, timedelta
+
+    result: dict[str, list[AnomalyFeature]] = {
+        "spike": [],
+        "accumulation": [],
+        "secular_trend": [],
+    }
+
+    windows = [
+        ("spike", 1),
+        ("accumulation", 3),
+        ("secular_trend", 7),
+    ]
+
+    target_date = datetime.strptime(date_str, "%Y-%m-%d")
+
+    for win_label, win_days in windows:
+        # Collect snippets in window
+        window_snippets = []
+        for offset in range(win_days):
+            d = target_date - timedelta(days=offset)
+            d_str = d.strftime("%Y-%m-%d")
+            snippets = db.get_news_snippets(date=d_str)
+            window_snippets.extend(snippets)
+
+        if len(window_snippets) < 3:
+            continue
+
+        # Ensure embeddings are loaded
+        window_snippets = [s for s in window_snippets if s.get("embedding")]
+
+        if len(window_snippets) < 3:
+            continue
+
+        features = find_features(
+            window_snippets, db,
+            feature_lib_entries=feature_lib_entries,
+            attention_entities=attention_entities,
+        )
+
+        # Tag features with window label
+        for f in features:
+            f.screening_method = f"entity_grounded_v2_{win_label}"
+            # Adjust confidence for wider windows (more data = higher baseline)
+            if win_days > 1:
+                f.detection_confidence = round(f.detection_confidence * 0.85, 4)
+
+        result[win_label].extend(features)
+
+    # De-duplicate: if same feature appears in multiple windows, keep in narrowest
+    seen_ids: set[str] = set()
+    for win_label in ["spike", "accumulation", "secular_trend"]:
+        deduped = []
+        for f in result[win_label]:
+            if f.feature_id not in seen_ids:
+                seen_ids.add(f.feature_id)
+                deduped.append(f)
+        result[win_label] = deduped
+
+    return result
 
 
 # ── Cluster cross-day tracking ────────────────────────────────────────────
