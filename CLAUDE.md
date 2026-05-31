@@ -2,9 +2,6 @@
 
 当用户请求匹配以下触发条件时，使用 `Skill` 工具调用对应技能。
 
-## 活跃技能
-
-- **harness_news-agent** — 每日新闻工作流统一编排。代码层：`harness/news_agent/` 包，入口 `python -m harness.news_agent --step <name>`。Skill 文件：`~/.claude/skills/harness_news-agent.md`。
 
 ## Harness 代码层能力
 
