@@ -1,48 +1,86 @@
+```
+```
 ```markdown
 ---
-name: harness-health-check
-description: 诊断AI治理harness运行状态并统计累积错误的流程
+name: harness-error-diagnosis
+description: 通过查询 harness 的 SQLite 状态库，快速评估错误积累与系统健康度。
 tags: [news-workflow, ai-governance, data-compliance, prethink:exploration]
 triggers:
-  - 用户询问“我的harness现在运行如何了”或“积累了多少错误”
+  - 用户询问“harness 运行如何”“积累了多少错误”等系统状态
+  - 需要审计 AI 治理流水线的故障与置信度趋势
 version: 1
 harness_confidence: 0.85
 ---
 
-# Harness 状态诊断与错误审计
+# 诊断 Harness 错误积累
 
 ## 执行逻辑
 ### When to Use
-- 需要快速了解 harness 整体健康状况、活跃错误数量和趋势。
-- 自动分析命令不可用或信息不完整时，需要手动探查底层存储。
+- 用户或系统触发对 harness 运行健康的检查。
+- 希望获得错误信号数量、判断图健康度、假设验证状态的聚合视图。
 
 ### Step-by-Step
-1. **尝试使用内置分析命令**  
-   - 执行 `python harness/harness_daemon.py analyze`（注意路径用 `/` 或平台适配分隔符）。  
-   - 若因路径错误失败，修正后重试；若命令根本不存在，继续下一步。
-2. **直接查询状态数据库**（`harness/state.db`）  
-   - 获取 **判断图健康**：`judgment_entries` 总数与平均置信度。  
-   - 统计 **错误/失败相关特征激活**：从 `feature_activations` 中筛选包含 `error` 或 `fail` 的条目。  
-   - 列出 **所有假设** 及其状态与描述（`hypotheses`）。  
-   - 统计 **错误信号** 数量：`signal_buffer` 中 `signal_type` 含 `error`/`fail` 的记录。  
-   - 获取 **最近判断条目**（最近 10 条）看趋势。  
-   - 获取 **关键表结构**（`PRAGMA table_info`）以确认当前数据模型（针对 `judgment_entries`, `belief_traces`, `false_belief_log`, `observations`, `fusion_sessions`, `dcl_judgments`, `hypotheses`, `signal_buffer`, `feature_activations` 等）。
-3. **汇总结果**  
-   - 报告错误总数：将特征激活、信号、假设中涉及错误的条目合并去重计数。  
-   - 补充展示平均置信度、活跃假设等指标，给出整体健康摘要。
+1. **首选入口**：尝试运行分析命令  
+   `python harness/harness_daemon.py analyze`  
+   若因路径错误或其他原因失败（退出码 2），直接进入步骤 2。
+
+2. **直接诊断数据库**：  
+   - 定位数据库 `harness/state.db`（若路径不同需替换）。  
+   - 使用 Python `sqlite3` 连接，一次性或分批执行以下查询，避免锁冲突。
+
+   a) **错误/失败信号总数**：  
+      ```sql
+      SELECT COUNT(*) FROM signal_buffer
+       WHERE json_extract(payload, '$.signal_type') LIKE '%error%'
+          OR json_extract(payload, '$.signal_type') LIKE '%fail%';
+      ```
+
+   b) **特征激活中的错误/失败次数**：  
+      ```sql
+      SELECT COUNT(*) FROM feature_activations
+       WHERE json_extract(payload, '$.type') LIKE '%error%'
+          OR json_extract(payload, '$.type') LIKE '%fail%';
+      ```
+
+   c) **判断图健康状况**：  
+      ```sql
+      SELECT COUNT(*) AS total_judgments,
+             AVG(CAST(json_extract(payload, '$.confidence') AS REAL)) AS avg_confidence
+      FROM judgment_entries;
+      ```
+      再取最近 10 条判断查看置信度趋势：  
+      ```sql
+      SELECT entry_id, json_extract(payload, '$.category'), 
+             json_extract(payload, '$.confidence')
+      FROM judgment_entries ORDER BY entry_id DESC LIMIT 10;
+      ```
+
+   d) **假设状态**：  
+      ```sql
+      SELECT hypothesis_id, status, json_extract(payload, '$.description')
+      FROM hypotheses;
+      ```
+      标记处于 `failed`、`contradicted`、`pending` 的假设数量。
+
+3. **输出摘要**：  
+   - 错误信号总数。
+   - 特征激活中错误/失败数量。
+   - 判断图总条目数、平均置信度、最近判断示例。
+   - 假设状态分布。
+   - 若平均置信度持续低于阈值（如 0.6），标记为需要干预。
 
 ### How to Verify
-- 所有 SQL 查询应返回有效数值或结果集，无报错。  
-- 人工复核一两个错误条目，确认内容合理（如错误特征激活描述确实为故障）。  
-- 若可能，与 harness 自带的仪表板或日志交叉比对。
+- 执行查询后确认返回数字非负，且与系统近期行为吻合。
+- 若 `hypotheses` 表为空但应有数据，检查上游融合层是否正常写入。
 
 ## 异常处理
 ### Edge Cases
-- **数据库不存在或损坏**：回退到检查日志文件（`harness/logs/`），查找错误堆栈。  
-- **路径分隔符问题**（Windows/Linux）：使用 `os.path.join` 或统一使用 `/` 适配。  
-- **查询超时**：限制 `LIMIT` 或使用索引字段，必要时只统计计数而不提取详情。  
-- **无错误记录**：报告“零错误”，但需确认是因为系统健康还是数据未采集（检查数据库是否为空）。
+- **路径分隔符问题**：Windows 下可能需用反斜杠或正斜杠，优先使用 `harness/harness_daemon.py`。
+- **数据库锁定**：若其他进程正在写库，增加超时参数或重试。
+- **表缺失**：若某表不存在（如旧版 harness 无 `belief_traces`），则跳过对应查询，并在结果中注明。
+- **大量条目**：`judgment_entries` 或 `signal_buffer` 极大时，限制 `LIMIT` 并索引时间戳，避免全表扫描影响响应。
 
 ### Fallback
-- 若所有自动化手段失效，建议用户手动检查 `harness` 目录下的最近日志、守护进程输出，或重启 harness 后即刻观察状态。
+- 如果数据库完全不可访问，提示用户检查 harness 进程是否运行、磁盘空间、权限。
+- 可回退到读取最近的日志文件（如 `harness/logs/`），正则匹配 `ERROR` 字样作为临时统计。
 ```

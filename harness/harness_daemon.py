@@ -793,6 +793,10 @@ def cmd_inject():
     # Only write when there ARE active constraints — destructive overwrite
     # would nuke data written by other subsystems (search_feedback, feishu_push, etc.)
     constraints = _load_active_constraints(db_path)
+    # Ensure critical constraints are always seeded (idempotent)
+    _ensure_critical_constraints(db_path)
+    # Reload — _ensure may have added new constraints
+    constraints = _load_active_constraints(db_path)
     if constraints:
         _write_constraint_cache(constraints)
 
@@ -1043,6 +1047,59 @@ def _seed_constraints(db, candidates: list[dict], session_id: str):
                 (name, tool, pattern, message, session_id, now + 86400, now),
             )
         db._conn.commit()
+
+
+def _ensure_critical_constraints(db_path: Path):
+    """Seed permanent critical constraints if they don't exist (idempotent).
+
+    These constraints protect shared infrastructure (settings files, hooks)
+    from accidental damage during automated operations.
+    """
+    critical_constraints = [
+        {
+            "name": "hooks-settings-preserve-foreign",
+            "tool_name": "Edit",
+            "match_pattern": "settings.local.json",
+            "action": "warn",
+            "message": (
+                "⚠️ 正在修改 settings.local.json 的 hooks 区域。"
+                "请确认未删除非 Harness 管理的 Hook（Stop/Notification 等）。"
+                "Harness 仅管理: UserPromptSubmit, SessionStart, PreToolUse, PostToolUse。"
+                "其他 Hook 事件必须原样保留。"
+            ),
+        },
+        {
+            "name": "hooks-settings-preserve-foreign-write",
+            "tool_name": "Write",
+            "match_pattern": "settings.local.json",
+            "action": "warn",
+            "message": (
+                "⚠️ 正在覆写 settings.local.json。"
+                "如果 hooks 字段包含非 Harness 管理的 Hook（Stop/Notification 等），"
+                "必须原样保留。Harness 仅管理: UserPromptSubmit, SessionStart, PreToolUse, PostToolUse。"
+            ),
+        },
+    ]
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=2)
+        conn.execute("PRAGMA journal_mode=WAL")
+        for c in critical_constraints:
+            cur = conn.execute(
+                "SELECT id FROM constraints WHERE name=? AND active=1", (c["name"],)
+            )
+            if cur.fetchone() is None:
+                conn.execute(
+                    "INSERT INTO constraints "
+                    "(name, tool_name, match_pattern, action, message, "
+                    "violation_count, max_violations, active, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, 0, 999, 1, unixepoch())",
+                    (c["name"], c["tool_name"], c["match_pattern"],
+                     c["action"], c["message"]),
+                )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # Non-critical; don't block inject on constraint seeding failure
 
 
 def _load_active_constraints(db_path: Path) -> list[dict]:
@@ -2054,7 +2111,10 @@ def _run_preflight_checks(config: dict, config_path: Path) -> list:
     # Check 8: Meta-ToM pipeline status — L0 report only
     _probe_mind_health(checks, config)
 
-    # Check 9-N: Data source health probes — L0 report only (can't fix other servers)
+    # Check 9: Critical hook integrity — L0 report only
+    _probe_hook_integrity(checks)
+
+    # Check 10-N: Data source health probes — L0 report only (can't fix other servers)
     _probe_data_sources(checks)
 
     return checks
@@ -2138,6 +2198,97 @@ def _probe_mind_health(checks: list, config: dict):
         conn.close()
     except Exception as e:
         checks.append(("Meta-ToM 管线", False, f"查询失败: {str(e)[:80]}", None))
+
+
+# ── Critical hook definitions ──────────────────────────────────────────────
+# Hooks that the harness does NOT own but must verify exist.
+# Format: {hook_event: {"command_fragment": "unique substring in command", "label": "human name"}}
+_CRITICAL_FOREIGN_HOOKS: dict = {
+    "Stop": {
+        "command_fragment": "claude-code-notifier",
+        "label": "claude-code-notifier (Stop → 桌面通知: 回复完成)",
+    },
+    "Notification": {
+        "command_fragment": "claude-code-notifier",
+        "label": "claude-code-notifier (Notification → 桌面通知: 等待输入)",
+    },
+}
+
+# Hook events the harness manages — these must NOT be dropped when harness writes config.
+_HARNESS_MANAGED_HOOK_EVENTS: frozenset = frozenset({
+    "UserPromptSubmit", "SessionStart", "PreToolUse", "PostToolUse",
+})
+
+
+def _load_all_hooks() -> dict:
+    """Merge hooks from settings.json and settings.local.json.
+
+    settings.local.json takes precedence per Claude Code merge semantics.
+    Returns a dict of {hook_event: [entries]}.
+    """
+    all_hooks: dict = {}
+    for path in (
+        Path.home() / ".claude" / "settings.json",
+        Path.home() / ".claude" / "settings.local.json",
+    ):
+        try:
+            if path.exists():
+                s = json.loads(path.read_text(encoding="utf-8"))
+                for event, entries in s.get("hooks", {}).items():
+                    all_hooks[event] = entries
+        except Exception:
+            pass
+    return all_hooks
+
+
+def _probe_hook_integrity(checks: list):
+    """L0: Verify critical non-harness hooks exist in settings.
+
+    Reads both settings.json and settings.local.json (merged).
+    Reports any missing critical foreign hooks.
+    Does NOT auto-fix — harness does not own these hooks.
+    """
+    all_hooks = _load_all_hooks()
+    for event, spec in _CRITICAL_FOREIGN_HOOKS.items():
+        entries = all_hooks.get(event, [])
+        found = False
+        for entry in entries:
+            for h in entry.get("hooks", []):
+                cmd = h.get("command", "")
+                if spec["command_fragment"] in cmd:
+                    found = True
+                    break
+            if found:
+                break
+        if not found:
+            checks.append((
+                "关键Hook缺失",
+                False,
+                f"{event} Hook 未指向 {spec['label']}。"
+                "桌面通知将不会触发。需手动恢复。",
+                None,
+            ))
+
+
+def _preserve_foreign_hooks_before_write(settings_path: Path) -> dict:
+    """Read existing settings, return the foreign hooks that must be preserved.
+
+    Call BEFORE writing to a settings file. Returns a dict of
+    {hook_event: [entries]} that the harness must NOT strip.
+
+    Used as a safety net: if any harness code rewrites the hooks section,
+    it must merge these back in.
+    """
+    foreign: dict = {}
+    try:
+        if settings_path.exists():
+            s = json.loads(settings_path.read_text(encoding="utf-8"))
+            for event, entries in s.get("hooks", {}).items():
+                if event not in _HARNESS_MANAGED_HOOK_EVENTS:
+                    foreign[event] = entries
+    except Exception:
+        pass
+    return foreign
 
 
 def _probe_data_sources(checks: list):

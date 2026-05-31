@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "timestamp": 1780208736.7307632,
+  "timestamp": 1780216569.1396704,
   "skills": [
     {
       "name": "harness_env-fix_ai-governance",
@@ -9,7 +9,7 @@
       "confidence": 0.6,
       "usage_count": 0,
       "last_used_days": null,
-      "idle_days": 0.1
+      "idle_days": 0.2
     },
     {
       "name": "harness_env-fix_data-compliance",
@@ -18,7 +18,7 @@
       "confidence": 0.6,
       "usage_count": 0,
       "last_used_days": null,
-      "idle_days": 0.1
+      "idle_days": 0.2
     },
     {
       "name": "harness_mental-model_data-compliance",
@@ -27,7 +27,7 @@
       "confidence": 0.6,
       "usage_count": 0,
       "last_used_days": null,
-      "idle_days": 0.1
+      "idle_days": 0.2
     },
     {
       "name": "harness_mental-model_news-workflow",
@@ -45,7 +45,7 @@
       "confidence": 0.6,
       "usage_count": 0,
       "last_used_days": null,
-      "idle_days": 0.1
+      "idle_days": 0.2
     },
     {
       "name": "harness_task-workflow_news-workflow",
@@ -73,7 +73,7 @@
       "domain": "complexity",
       "severity": "warning",
       "message": "High cyclomatic complexity: harness_daemon.py:_run_mind_pipeline (CC=53)",
-      "timestamp": 1780208736.7307632
+      "timestamp": 1780216569.1396704
     }
   ]
 }

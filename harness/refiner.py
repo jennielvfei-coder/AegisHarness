@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -28,6 +29,26 @@ def _get_api_credentials() -> tuple:
         token = env.get("ANTHROPIC_AUTH_TOKEN", os.environ.get("ANTHROPIC_AUTH_TOKEN", ""))
         return base_url, token
     return None, None
+
+
+def _count_recent_pending_skills(hours: int = 24) -> int:
+    """Count pending skill files created within the last N hours.
+
+    Checks the harness/skills/ directory (pending review queue).
+    Used by anti-bloat logic to prevent feedback-loop flooding.
+    """
+    try:
+        skills_dir = Path(__file__).resolve().parent / "skills"
+        if not skills_dir.exists():
+            return 0
+        cutoff = time.time() - hours * 3600
+        count = 0
+        for sf in skills_dir.glob("harness_*.md"):
+            if sf.stat().st_mtime >= cutoff:
+                count += 1
+        return count
+    except Exception:
+        return 0
 
 
 def _build_skill_prompt(session_content: str, observation: dict, action: str) -> str:
@@ -239,6 +260,18 @@ def refine(
     config = load_config(config_path)
     if not config.get("refiner", {}).get("enabled", False):
         print("[refiner] Refiner is disabled in config. Skipping.")
+        return None
+
+    # ── P₀: 24h anti-bloat cap ──
+    # If ≥3 skills were generated in the past 24h (by any observation action),
+    # skip new generation. This prevents observation→skill feedback loops from
+    # flooding the review queue with near-duplicates.
+    bloat_limit = config.get("refiner", {}).get("max_skills_per_24h", 3)
+    if _count_recent_pending_skills(hours=24) >= bloat_limit:
+        print(
+            f"[refiner] ⚠️  Anti-bloat: ≥{bloat_limit} skills generated in past 24h. "
+            "Skipping new generation. Review + archive the pending queue first."
+        )
         return None
 
     base_url, token = _get_api_credentials()

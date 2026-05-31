@@ -1,60 +1,59 @@
 ```markdown
 ---
-name: multi-source-news-briefing
-description: 多源新闻聚合与简报生成工作流，包含环境验证、并行拉取、已知失败源跳过、去重交叉验证与结构化输出。
-tags: [news-workflow, data-quality-failure, multi-source]
+name: diagnose-harness-state-and-errors
+description: Diagnose the operational state of the harness system, count accumulated errors, and present aggregated trends by querying the judgment graph and signal buffer.
+tags: [ai-governance, data-compliance, news-workflow, prethink:exploration]
 triggers:
-  - 用户请求新闻聚合、日报、简报、快讯或类似多源信息汇总。
-  - 需要从多个API/数据源并行获取数据并生成结构化输出时。
+  - User asks "how is the harness running?" or "how many errors have accumulated?"
+  - Routine health check of harness daemon
 version: 1
-harness_confidence: 0.9
+harness_confidence: 0.8
 ---
 
-# 多源新闻聚合与简报生成
+# Diagnose Harness State and Accumulated Errors
 
 ## 执行逻辑
 ### When to Use
-- 用户要求“今天有什么新闻”、“整理一份行业简报”、“生成最近科技动态”等需要多来源信息聚合的场景。
-- 已知存在多个异构数据源（如REST API、arXiv、内部文件），需并行拉取后统一整理。
+When the user needs a quick diagnostic summary of the harness daemon's health—specifically operation status, error counts, recent judgments, and hypothesis activity—this workflow provides a repeatable path from high‑level command to low‑level SQL queries.
 
 ### Step-by-Step
-1. **环境验证**  
-   - 检查必需的外部连接（如 MCP 服务 `world-news-api` 或其他关键API），若缺失则中断并提示用户。  
-   - 加载已知失败源列表（如某类 WebFetch 源不可用），后续步骤直接跳过并标记 `⚠️`，避免浪费重试。
-
-2. **加载模板与基线**  
-   - 读取用户偏好模板（Markdown）、历史去重基线（先前已报道条目列表）。  
-   - 若无模板，使用内置默认结构（总览表 → 分类详情 → 影响分析）。
-
-3. **并行拉取数据**  
-   - **主源**：调用高可靠度新闻API（如 World News API），指定必要参数（国家、语言等）。  
-   - **补充源**：并行请求学术源（arXiv）、国内源（RSS/备用API）。  
-   - **原则**：所有源同时发起，失败源仅标记状态（`⚠️暂无数据` 或 `⛔️已跳过`），不阻塞其他源，不自动重试已知失败源。
-
-4. **去重与交叉验证**  
-   - 基于标题/URL 相似度（如 Levenshtein 阈值）去除重复新闻。  
-   - 对高影响条目（如政策变化、重大技术突破）执行多源交叉验证，记录来源数量与可信度。
-
-5. **按模板生成输出**  
-   - 填充分类表格（科技/财经/国际等），每项包含标题、摘要、影响分析、来源评级。  
-   - 写入指定文件路径（如 `news/YYYY-MM-DD.md`），同时更新去重基线。
-
-6. **收尾验证**  
-   - 确认输出文件成功创建且内容不为空。  
-   - 若有新增失败源（临时不可用），记录到环境说明，供下次会话使用。
+1. **Primary Approach: Invoke the harness analyze subcommand**
+   - Execute `python harness/harness_daemon.py analyze` (adjust separator and working directory as needed).
+   - If the command succeeds, parse the output and present a summary.
+2. **Fallback: Direct database interrogation**
+   - Connect to the SQLite state database (typically `harness/state.db`).
+   - Query the following tables and views to gather health metrics:
+     a. `judgment_entries` – total count, average confidence, most recent entries (categories and confidence).
+     b. `feature_activations` – count of rows where payload type contains `error` or `fail`.
+     c. `hypotheses` – list all hypotheses with status and description.
+     d. `signal_buffer` – count of error/fail signal types.
+   - Use `json_extract` to navigate payload columns; encapsulate queries in a single Python script (`-c`) to avoid quoting issues.
+3. **Enrich with additional context**
+   - Optionally retrieve schema from key tables (`PRAGMA table_info`) if unfamiliar with the exact structure.
+   - Check `belief_traces`, `false_belief_log`, and `dcl_judgments` for deeper insights if errors appear.
+4. **Summarize and format**
+   - Aggregate key numbers: judgment count, average confidence, error‑related activations, active/failed hypotheses, queued error signals.
+   - Present findings concisely, highlighting anomalies.
 
 ### How to Verify
-- 输出文件存在且内容符合模板结构。  
-- 当天所有条目均未出现在历史基线中。  
-- 日志中除预先声明的失败源外，无意外错误。
+- Confirm that the output includes:
+  - Total judgment entries and average confidence.
+  - Error‑related feature activation count.
+  - List of available hypotheses with statuses.
+  - Recent judgment categories.
+- Cross‑check at least one number manually with a simple SQLite query.
 
 ## 异常处理
 ### Edge Cases
-- **某数据源返回空/超时**：标记为 `⚠️无内容`，继续其他源。  
-- **国内源重定向死循环**：立即切换至备用源（如财联社替代经济日报），并在配置中更新默认源。  
-- **所有数据源均失败**：降级策略——提示用户“今日新闻获取失败，请稍后重试”，不生成空文件。
+- **Path separator issues**: Windows and Unix differ in backslash/forward slash; prefer `pathlib` or raw strings when constructing file paths.
+- **Command not found**: If `harness_daemon.py` is missing, immediately fall back to direct SQLite queries.
+- **Database locked**: Retry after a short delay (e.g., 1 second) or read from a backup if available.
+- **Empty tables**: Treat missing tables as “no data” and report clearly—do not raise errors.
+- **Large payloads**: Use `json_extract` to filter only necessary fields, avoiding scanning entire JSON blobs.
 
 ### Fallback
-- 若主API不可用：提示用户检查连接（如 `claude mcp list`），并询问是否仅使用备用源生成简约版本。  
-- 若模板文件缺失：使用硬编码的默认结构（总览表 + 三条重点新闻），确保仍可输出简要信息。
+- If both the daemon command and the SQLite database are unavailable, inspect the file system:
+  - Look for log files in the `harness/` directory.
+  - Use `dir`/`ls -la` to check for recent modifications (e.g., `.log`, `.db‑journal` files).
+- When even filesystem access fails, report that the harness appears to be offline and recommend a restart or manual check.
 ```
