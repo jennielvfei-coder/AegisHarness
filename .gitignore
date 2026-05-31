@@ -26,6 +26,9 @@ input/
 output/
 memory.jsonl
 
+# Nested repos
+claude-code-notifier/
+
 # Cloned external repos
 browser-use/
 local-deep-research/
