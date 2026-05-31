@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "timestamp": 1780228682.378421,
+  "timestamp": 1780228608.6781967,
   "system_risk_level": 67,
   "skills": [
     {
@@ -80,7 +80,14 @@
       "[CRIT] hook_latency: val=13000.00, trend=stable"
     ]
   },
-  "predictions": [],
+  "predictions": [
+    {
+      "domain": "complexity",
+      "severity": "warning",
+      "message": "High cyclomatic complexity: harness_daemon.py:_run_mind_pipeline (CC=53)",
+      "timestamp": 1780228608.6781967
+    }
+  ],
   "recommendations": [
     {
       "priority": "critical",

@@ -4,15 +4,15 @@
 
 ## 活跃技能
 
-- **harness_news-agent** — 每日新闻工作流统一编排。代码层：`harness/news_agent/` 包，入口 `python -m harness.news_agent --step <name>`。Skill 文件：`~/.claude/skills/harness_news-agent.md`。
+- **duonews** — DuoNews 每日新闻智能体，独立于 Harness。代码层：`duonews/` 包，入口 `python -m duonews --step <name>`。Skill 文件：`~/.claude/skills/duonews/SKILL.md`。
 
 ## Harness 代码层能力
 
 - **Preflight auto-fix** — session start 时自动修复已知配置问题
-- **Intent matcher** — 特征词加权匹配用户意图（关键词从 `news_agent/config.py` 读取），注入轻量上下文指针
+- **Intent matcher** — 特征词加权匹配用户意图（关键词从 `duonews/config.py` 读取），注入轻量上下文指针
 - **Constraint registry** — PreToolUse hook 硬阻断已知失败的工具调用
 - **Cross-session analysis** — `python harness_daemon.py analyze` 聚合趋势
-- **News Agent** — `harness/news_agent/` 统一入口包，含 search/arxiv/preprocess/cross_day/push/vectorize/feedback/diagnose 8个步骤
+- **DuoNews** — `duonews/` 独立新闻智能体，含 github/search/arxiv/preprocess/cross_day/push/vectorize/feedback/diagnose 9个步骤，继承 Harness 核心分析能力
 
 ## 铁律
 
@@ -43,3 +43,9 @@
 ## 待审查技能
 
 运行 `python D:\Claude\harness\harness_daemon.py review` 查看队列。
+
+<!-- SPECKIT START -->
+For additional context about technologies to be used, project structure,
+shell commands, and other important information, read the current plan:
+specs/001-duonews-p0-breakpoints/plan.md
+<!-- SPECKIT END -->

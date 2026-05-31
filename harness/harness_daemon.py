@@ -32,6 +32,91 @@ HARNESS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(HARNESS_DIR))
 
 
+
+
+def _check_hooks_integrity(output: "InjectorOutput"):
+    """Check that expected harness hooks are wired in settings files.
+
+    Reads settings.local.json (project) and settings.json (user).
+    If expected hooks are missing, injects a visible warning into context
+    AND prints to stderr. This closes the "build-wire gap" — code exists
+    but configuration was never written.
+    """
+    EXPECTED = {
+        "SessionStart": "harness_daemon.py inject",
+        "Stop": "harness_daemon.py observe",
+        "UserPromptSubmit": "hooks.py",
+        "PreToolUse": "hooks.py pre-tool",
+        "PostToolUse": "hooks.py post-tool",
+    }
+
+    missing = []
+    try:
+        # Check project settings
+        project_settings_path = Path.home() / ".claude" / "projects" / "D--Claude" / "settings.local.json"
+        # Actually, Claude Code stores project settings at D:\Claude\.claude\settings.local.json
+        alt_path = Path("D:/Claude/.claude/settings.local.json")
+        settings_paths = [alt_path, Path.home() / ".claude" / "settings.json"]
+
+        all_hooks = {}
+        for sp in settings_paths:
+            try:
+                if sp.exists():
+                    data = json.loads(sp.read_text(encoding="utf-8"))
+                    hooks = data.get("hooks", {})
+                    for event, entries in hooks.items():
+                        if event not in all_hooks:
+                            all_hooks[event] = []
+                        for entry in entries:
+                            # Support both flat format ({command, async, type})
+                            # and nested format ({hooks: [{command, async}]})
+                            if "command" in entry:
+                                all_hooks[event].append(entry.get("command", ""))
+                            for h in entry.get("hooks", []):
+                                all_hooks[event].append(h.get("command", ""))
+            except Exception:
+                pass
+
+        for event, expected_cmd_fragment in EXPECTED.items():
+            commands = all_hooks.get(event, [])
+            if not any(expected_cmd_fragment in cmd for cmd in commands):
+                missing.append(f"{event} (expected: {expected_cmd_fragment})")
+
+        if missing:
+            print(
+                f"[harness] ⚠️ HOOK INTEGRITY: {len(missing)} expected hook(s) not wired:",
+                file=sys.stderr, flush=True,
+            )
+            for m in missing:
+                print(f"[harness]   Missing: {m}", file=sys.stderr, flush=True)
+            # Inject visible warning
+            lines = [
+                "⚠️ **Harness hooks 未完整配置** — 以下 hook 事件缺失:",
+                *[f"  - `{m}`" for m in missing],
+                "运行 `Skill(update-config)` 或手动编辑 `settings.local.json` 修复。",
+                "无 hook = 无约束阻断、无信号检测、无上下文注入。",
+            ]
+            output.add(0.99, "## ⚠️ Hook Integrity", lines)
+    except Exception as e:
+        print(f"[harness] hook integrity check failed: {e}", file=sys.stderr, flush=True)
+
+
+def _read_system_risk(db_path: Path) -> int:
+    """Read system_risk_level from last persisted self_model.json.
+
+    Returns 0 if the file doesn't exist or can't be read.
+    This is a "fast variable" — one JSON read, no DB connection needed.
+    """
+    try:
+        sm_path = HARNESS_DIR / "self_model.json"
+        if sm_path.exists():
+            data = json.loads(sm_path.read_text(encoding="utf-8"))
+            return int(data.get("system_risk_level", 0))
+    except Exception:
+        pass
+    return 0
+
+
 def _detect_conflicts(situational_model, report) -> list[dict]:
     """Detect disagreements between PreThink classification and Observer action.
 
@@ -200,7 +285,8 @@ def cmd_observe():
                     user_msg = e.get("content", "")[:500]
                     break
 
-            situational_model = run_prethink(user_msg, fingerprint, db)
+            situational_model = run_prethink(user_msg, fingerprint, db,
+                                                 system_risk_level=_read_system_risk(db_path))
             # Store model for next session's inject phase
             from prethink import situational_model_to_dict
             db.set_meta("latest_situational_model",
@@ -789,6 +875,11 @@ def cmd_inject():
     except Exception:
         pass
 
+    # ── Hook integrity check: verify expected harness hooks are wired ──
+    # This is the self-healing diagnostic: if hooks were never configured
+    # (the "build-wire gap" pattern), surface it loudly so it gets fixed.
+    _check_hooks_integrity(output)
+
     # ── Load constraint cache for PreToolUse hook ──
     # Only write when there ARE active constraints — destructive overwrite
     # would nuke data written by other subsystems (search_feedback, feishu_push, etc.)
@@ -832,6 +923,17 @@ def cmd_inject():
             ))
     except Exception:
         pass
+
+    # ── Inject-time budget boost: global health directly adjusts context budget ──
+    # This is the "fast variable" path — no session delay. SelfModel's system_risk_level
+    # can immediately increase the injection budget when harness health is poor,
+    # giving Claude more diagnostic context in the current session.
+    if self_model and self_model.system_risk_level >= 25:
+        boost = 15 if self_model.system_risk_level >= 50 else 8
+        old_max = output._max_lines
+        output._max_lines = min(old_max + boost, 60)  # hard cap at 60 lines
+        print(f"[harness] SelfModel risk={self_model.system_risk_level}: "
+              f"budget boosted {old_max}→{output._max_lines}", file=sys.stderr)
 
     # ── SelfModel injection (replaces active_skills, pending_reviews, skill_health, constraint summary, health alerts) ──
     if self_model:
@@ -1331,7 +1433,7 @@ def _inject_constraints_detailed(output: InjectorOutput, constraints: list[dict]
         escalated = " 🔴已升级" if c["violations"] >= c["max_violations"] else ""
         lines.append(
             f"- ⛔ **{c['tool_name']}** `{c['match_pattern'][:50]}` — "
-            f"违反 {c['violations']}/{c['max_violations']}{escaled}"
+            f"违反 {c['violations']}/{c['max_violations']}{escalated}"
         )
     output.add(0.82, "## ⛔ Constraint Registry", lines)
 

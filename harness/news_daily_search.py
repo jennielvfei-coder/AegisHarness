@@ -1,8 +1,8 @@
 """
-[DEPRECATED] 已迁移到 duonews.ingest
+[DEPRECATED] 已迁移到 duonews.search.run_daily_search()
 此文件保留作为过渡，一周后（2026-06-07）删除。
 """
-from duonews.ingest import AnysearchResult, ingest
+from duonews.search import run_daily_search
 
 if __name__ == "__main__":
     import sys
