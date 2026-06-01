@@ -81,29 +81,45 @@ def _connect(db_path: Path) -> sqlite3.Connection:
 def _probe_hook_latency(db_path: Path) -> ProbeReading:
     """Check if hook latency is within safe bounds.
 
-    Computes inter-call timing from adjacent tool_call_log timestamps
-    as a proxy for actual duration_ms (which is not populated).
+    Uses actual duration_ms from tool_call_log (populated by hooks.py
+    post_tool_use). Falls back to inter-call timing from timestamps
+    when no duration_ms data exists (legacy entries).
     """
+    # Prefer actual hook execution duration
     conn = _connect(db_path)
     cur = conn.execute(
-        "SELECT timestamp FROM tool_call_log ORDER BY timestamp DESC LIMIT 101"
+        "SELECT duration_ms FROM tool_call_log "
+        "WHERE duration_ms IS NOT NULL AND duration_ms > 0 "
+        "ORDER BY id DESC LIMIT 100"
     )
-    timestamps = [r[0] for r in cur.fetchall()]
+    durations = [r[0] for r in cur.fetchall()]
     conn.close()
 
-    if len(timestamps) < 2:
-        return ProbeReading(
-            name="hook_latency", value=0.0, trend="stable",
-            threshold_warning=HOOK_LATENCY_WARN_MS,
-            threshold_critical=HOOK_LATENCY_CRIT_MS,
-            status="ok",
+    if len(durations) >= 2:
+        median = sorted(durations)[len(durations) // 2]
+    else:
+        # Fallback: inter-call timing from timestamps (legacy, inaccurate)
+        conn = _connect(db_path)
+        cur = conn.execute(
+            "SELECT timestamp FROM tool_call_log ORDER BY timestamp DESC LIMIT 101"
         )
+        timestamps = [r[0] for r in cur.fetchall()]
+        conn.close()
 
-    diffs = [
-        (timestamps[i] - timestamps[i + 1]) * 1000
-        for i in range(len(timestamps) - 1)
-    ]
-    median = sorted(diffs)[len(diffs) // 2]
+        if len(timestamps) < 2:
+            return ProbeReading(
+                name="hook_latency", value=0.0, trend="stable",
+                threshold_warning=HOOK_LATENCY_WARN_MS,
+                threshold_critical=HOOK_LATENCY_CRIT_MS,
+                status="ok",
+            )
+
+        diffs = [
+            (timestamps[i] - timestamps[i + 1]) * 1000
+            for i in range(len(timestamps) - 1)
+        ]
+        median = sorted(diffs)[len(diffs) // 2]
+
     status = (
         "critical" if median > HOOK_LATENCY_CRIT_MS
         else "warning" if median > HOOK_LATENCY_WARN_MS

@@ -1,60 +1,50 @@
-```
-```
 ```markdown
 ---
-name: proactive-configuration-audit
-description: Systematic approach: before modifying or fixing a local project harness, first check memory for known issues, review recent changes, inspect configuration files, and run diagnostic commands.
-tags: [ai-governance, data-compliance, prethink:exploration]
+name: multi-tool-parallel-debug
+description: 当用户需要同时验证或调试多种工具时，并行调用所有工具并汇总结果。
+tags: [debugging, multi-tool, orchestration]
 triggers:
-  - MCP servers fail to connect
-  - Harness hooks stop working
-  - Config changes suspected
-  - Before applying any fix to Claude Code settings
+  - 用户请求同时执行多个工具（如Read、Grep、Bash、MCP工具）
+  - 用户表达类似“一起来”、“一起执行”的指令
+  - 需要快速验证多个依赖或组件时
 version: 1
-harness_confidence: 0.85
+harness_confidence: 0.8
 ---
 
-# Proactive Configuration Audit
+# Multi-Tool Parallel Debug
 
 ## 执行逻辑
-
 ### When to Use
-Apply this mental model whenever local Claude commands fail, MCP servers report connection errors, or harness behaviour deviates unexpectedly. Also useful before committing configuration changes.
+- 用户明确要求“同时”或“一起”使用多个工具（如Read、Grep、Bash、MCP工具）。
+- 调试场景下需要快速验证多个独立操作的结果，避免逐个询问。
+- 任何需要并行收集信息的探索过程，且操作之间无依赖关系。
 
 ### Step-by-Step
-
-1. **Read Collective Memory**  
-   Open `~/.claude/projects/<project>/memory/MEMORY.md` (or equivalent) to retrieve previously recorded failure patterns, fixes, and architecture contradictions.
-
-2. **Survey Recent Changes**  
-   Run:
-   - `git diff --stat` to see which files have been modified
-   - `git diff` for full content diffs
-
-3. **Inspect Active Configuration**  
-   Load:
-   - `settings.local.json` and `settings.json` (check for missing entries like `skipWebFetchPreflight`, broken MCP wrapper settings, or missing hooks)
-   - Any `.claude/settings.json` or `.claude/hooks.json` that control guard behaviour
-
-4. **Isolate the Failure**  
-   Execute a minimal reproduction command (e.g., `python -c "import mcp_wrapper; ..."`) or run a single MCP test. Watch for tracebacks and exit codes.
-
-5. **Cross‑reference with Known Issues**  
-   Compare the current symptoms with memory entries (e.g., "MCP Wrapper Failure", "skipWebFetchPreflight Not Set", "Harness Active Guard Layer"). If a match is found, apply the documented fix; otherwise, proceed to deeper investigation.
+1. **解析请求** – 识别所有待执行的工具及其参数（文件路径、搜索模式、命令字符串、MCP工具名称等）。
+2. **准备调用** – 验证参数基本合法性（例如文件存在、模式有效），避免明显可预见的错误。
+3. **并行发起** – 一次性（或尽可能接近同时）创建所有工具调用，不等待单个调用完成。
+4. **收集结果** – 等待所有调用返回，无论成功或失败。
+5. **汇总输出** – 构建结构化报告，包含每个工具的名称、状态（成功/失败）、关键输出或错误信息。
+6. **反馈用户** – 呈现报告，允许用户基于并行结果进行下一步操作。
 
 ### How to Verify
-- The failing MCP server connects successfully.
-- Harness hooks fire correctly in a subsequent session.
-- Configuration files contain the expected keys (e.g., `skipWebFetchPreflight: true`).
-- A quick end‑to‑end test of the affected tool/command passes.
+- 用户能在一轮交互中获得所有请求工具的结果。
+- 每个工具的输出被完整保留（或裁剪到关键部分），失败工具也有明确说明。
+- 如果有工具失败，其余结果仍然可用，失败不影响整体流程。
 
 ## 异常处理
-
 ### Edge Cases
-- **Memory file absent** – `MEMORY.md` does not exist; skip step 1 but still check for other notes in the project.
-- **No git repository** – Use file‑system timestamps to identify recent modifications.
-- **Settings file missing** – Assume defaults; document the absence for future guards.
+| 情况 | 处理方式 |
+|---|---|
+| 某个工具调用超时 | 记录超时错误，继续等待其他结果，最终统一报告 |
+| 某个工具参数错误（如文件不存在） | 如启动前检测到，提示用户；若运行中失败，报告错误并继续其他工具 |
+| 工具之间存在依赖（A的输出是B的输入） | **不能并行**，降级为顺序执行，并告知用户需要分步进行 |
+| 用户未指定足够参数 | 暂停并行计划，逐个确认缺失参数，再决定是否可并行 |
+| 所有工具均失败 | 汇总所有错误，分析可能共性原因（如权限、网络），提示用户 |
 
 ### Fallback
-If the systematic audit does not reveal the cause, escalate to a full harness restart or regenerate the hook definitions from a known-good template. Record the new failure pattern in `MEMORY.md` once resolved.
+- 若执行环境不支持并行（如串行限制），回退为**批量顺序提交**：仍旧一次性生成所有工具调用，但在底层串行等待，最终统一汇总，用户感知类似并行。
+- 如果用户需要动态调整参数（如第一个工具的结果决定第二个工具的输入），则放弃并行模式，转为顺序交互。
+
+此模式是调试和探索工作流的“加速器”，在不引入复杂性的前提下最大化信息密度。
 ```

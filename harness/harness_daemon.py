@@ -13,6 +13,7 @@ import shutil
 import sqlite3
 import sys
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -218,6 +219,251 @@ class InjectorOutput:
 def load_config(config_path):
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+# ─── Tool log health monitoring ───────────────────────────────────────
+
+@dataclass
+class ToolLogAlert:
+    """A single alert from continuous tool log monitoring."""
+    tool_name: str
+    alert_type: str     # 'error_burst', 'tool_errors', 'mcp_down', 'stuck_loop', 'latency_spike', 'stale_log'
+    severity: str       # 'warning', 'critical'
+    detail: str
+    timestamp: float
+
+
+@dataclass
+class ToolLogHealth:
+    """Result of a single check_tool_log cycle."""
+    checked_at: float
+    window_start: float
+    window_minutes: int
+    total_calls: int
+    error_count: int
+    error_rate: float
+    alerts: list[ToolLogAlert] = field(default_factory=list)
+    per_tool: dict[str, dict] = field(default_factory=dict)
+    overall_status: str = "healthy"  # 'healthy', 'degraded', 'critical'
+
+
+# Thresholds for tool log monitoring
+TOOLLOG_ERROR_BURST_RATIO = 3.0        # window error rate / baseline error rate
+TOOLLOG_LATENCY_SPIKE_RATIO = 2.0      # window median latency / baseline median
+TOOLLOG_STUCK_LOOP_MIN = 5             # same tool+error repeats to flag
+TOOLLOG_STALE_MULTIPLIER = 3           # window * N without new entries = stale
+TOOLLOG_MCP_DOWN_THRESHOLD = 3         # consecutive mcp__ errors to flag
+
+
+def _db_connect(db_path: Path):
+    """Open SQLite connection with WAL mode (mirrors health_probes._connect)."""
+    conn = sqlite3.connect(str(db_path), timeout=2)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def check_tool_log(
+    db_path: Path,
+    window_minutes: int = 5,
+    last_checkpoint: float | None = None,
+) -> ToolLogHealth:
+    """Run all tool log health checks for the recent time window.
+
+    Args:
+        db_path: Path to harness SQLite database.
+        window_minutes: How many minutes back to scan (default 5).
+        last_checkpoint: If set, only checks entries after this timestamp.
+
+    Returns a ToolLogHealth with alerts for any anomalies found.
+    """
+    now = time.time()
+    window_start = last_checkpoint if last_checkpoint else (now - window_minutes * 60)
+
+    conn = _db_connect(db_path)
+
+    # ── Fetch recent entries ──────────────────────────────────────────
+    cur = conn.execute(
+        "SELECT tool_name, status, duration_ms, timestamp "
+        "FROM tool_call_log WHERE timestamp > ? "
+        "ORDER BY timestamp DESC",
+        (window_start,),
+    )
+    rows = cur.fetchall()
+
+    # ── Fetch baseline (last 24h, excluding current window) ───────────
+    baseline_start = now - 86400
+    cur = conn.execute(
+        "SELECT COUNT(*), SUM(CASE WHEN status='error' THEN 1 ELSE 0 END), "
+        "AVG(duration_ms) FROM tool_call_log "
+        "WHERE timestamp > ? AND timestamp <= ?",
+        (baseline_start, window_start),
+    )
+    base_total, base_errors, base_avg_latency = cur.fetchone()
+    base_total = base_total or 0
+    base_errors = base_errors or 0
+    baseline_error_rate = base_errors / base_total if base_total > 0 else 0.0
+    baseline_latency = base_avg_latency or 0.0
+
+    conn.close()
+
+    # ── Compute window stats ──────────────────────────────────────────
+    total_calls = len(rows)
+    error_count = sum(1 for r in rows if r[1] == "error")
+    error_rate = error_count / total_calls if total_calls > 0 else 0.0
+
+    # Per-tool breakdown
+    per_tool: dict[str, dict] = {}
+    for tool_name, status, duration_ms, _ts in rows:
+        if tool_name not in per_tool:
+            per_tool[tool_name] = {"calls": 0, "errors": 0, "durations": []}
+        per_tool[tool_name]["calls"] += 1
+        if status == "error":
+            per_tool[tool_name]["errors"] += 1
+        if duration_ms is not None and duration_ms > 0:
+            per_tool[tool_name]["durations"].append(duration_ms)
+
+    # Collapse durations to avg
+    for tool_name, stats in per_tool.items():
+        dur_list = stats.pop("durations")
+        stats["avg_latency_ms"] = round(sum(dur_list) / len(dur_list), 1) if dur_list else 0.0
+
+    alerts: list[ToolLogAlert] = []
+
+    # ── Check 1: Error burst ─────────────────────────────────────────
+    if total_calls >= 5 and baseline_error_rate > 0:
+        if error_rate > baseline_error_rate * TOOLLOG_ERROR_BURST_RATIO and error_rate > 0.3:
+            alerts.append(ToolLogAlert(
+                tool_name="*",
+                alert_type="error_burst",
+                severity="critical" if error_rate > 0.5 else "warning",
+                detail=(f"Error rate {error_rate:.0%} in last {window_minutes}min "
+                        f"(baseline {baseline_error_rate:.0%}, {total_calls} calls, {error_count} errors)"),
+                timestamp=now,
+            ))
+
+    # ── Check 2: Per-tool error rate ─────────────────────────────────
+    for tool_name, stats in sorted(per_tool.items()):
+        if stats["calls"] >= 3:
+            tool_err_rate = stats["errors"] / stats["calls"]
+            if tool_err_rate >= 0.5:
+                alerts.append(ToolLogAlert(
+                    tool_name=tool_name,
+                    alert_type="tool_errors",
+                    severity="critical" if tool_err_rate >= 0.8 else "warning",
+                    detail=(f"{tool_name}: {stats['errors']}/{stats['calls']} errors "
+                            f"({tool_err_rate:.0%}) in last {window_minutes}min"),
+                    timestamp=now,
+                ))
+
+    # ── Check 3: MCP disconnection ────────────────────────────────────
+    mcp_errors = 0
+    for tool_name, status, _dur, _ts in rows:
+        if tool_name.startswith("mcp__") and status == "error":
+            mcp_errors += 1
+    if mcp_errors >= TOOLLOG_MCP_DOWN_THRESHOLD:
+        affected = sorted({r[0] for r in rows if r[0].startswith("mcp__") and r[1] == "error"})
+        alerts.append(ToolLogAlert(
+            tool_name=",".join(affected[:3]),
+            alert_type="mcp_down",
+            severity="critical" if mcp_errors >= 6 else "warning",
+            detail=(f"{mcp_errors} MCP errors in last {window_minutes}min "
+                    f"(affected: {', '.join(affected[:5])})"),
+            timestamp=now,
+        ))
+
+    # ── Check 4: Stuck loop detection ─────────────────────────────────
+    error_patterns: dict[tuple[str, str], int] = {}
+    for tool_name, status, _dur, _ts in rows:
+        if status == "error":
+            key = (tool_name, "error")
+            error_patterns[key] = error_patterns.get(key, 0) + 1
+    for (tool_name, _), count in error_patterns.items():
+        if count >= TOOLLOG_STUCK_LOOP_MIN:
+            alerts.append(ToolLogAlert(
+                tool_name=tool_name,
+                alert_type="stuck_loop",
+                severity="critical" if count >= 10 else "warning",
+                detail=f"{tool_name} failed {count} times in last {window_minutes}min — possible stuck loop",
+                timestamp=now,
+            ))
+
+    # ── Check 5: Latency spike ────────────────────────────────────────
+    if total_calls >= 5 and baseline_latency > 0:
+        window_durations = [r[2] for r in rows if r[2] is not None and r[2] > 0]
+        if window_durations:
+            median_latency = sorted(window_durations)[len(window_durations) // 2]
+            if median_latency > baseline_latency * TOOLLOG_LATENCY_SPIKE_RATIO:
+                alerts.append(ToolLogAlert(
+                    tool_name="*",
+                    alert_type="latency_spike",
+                    severity="warning",
+                    detail=(f"Median latency {median_latency:.0f}ms vs baseline {baseline_latency:.0f}ms "
+                            f"({median_latency / baseline_latency:.1f}x) in last {window_minutes}min"),
+                    timestamp=now,
+                ))
+
+    # ── Check 6: Log staleness ────────────────────────────────────────
+    if total_calls == 0 and (now - window_start) > window_minutes * 60 * TOOLLOG_STALE_MULTIPLIER:
+        alerts.append(ToolLogAlert(
+            tool_name="*",
+            alert_type="stale_log",
+            severity="warning",
+            detail=(f"No tool calls logged in {window_minutes * TOOLLOG_STALE_MULTIPLIER}min "
+                    f"(since {time.strftime('%H:%M:%S', time.localtime(window_start))})"),
+            timestamp=now,
+        ))
+
+    # ── Overall status ────────────────────────────────────────────────
+    if any(a.severity == "critical" for a in alerts):
+        overall_status = "critical"
+    elif alerts:
+        overall_status = "degraded"
+    else:
+        overall_status = "healthy"
+
+    return ToolLogHealth(
+        checked_at=now,
+        window_start=window_start,
+        window_minutes=window_minutes,
+        total_calls=total_calls,
+        error_count=error_count,
+        error_rate=error_rate,
+        alerts=alerts,
+        per_tool=per_tool,
+        overall_status=overall_status,
+    )
+
+
+def _format_tool_log_report(health: ToolLogHealth) -> str:
+    """Format a ToolLogHealth result as a human-readable report."""
+    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(health.checked_at))
+    status_icon = {"healthy": "✓", "degraded": "⚠", "critical": "✗"}
+
+    lines = [
+        f"=== Tool Log Health [{ts}] {status_icon.get(health.overall_status, '?')} {health.overall_status.upper()} ===",
+        f"Window: {health.window_minutes}min | {health.total_calls} calls | "
+        f"{health.error_count} errors ({health.error_rate:.1%})",
+    ]
+
+    if health.per_tool:
+        lines.append("\nPer-tool breakdown:")
+        for tool_name, stats in sorted(health.per_tool.items(),
+                                        key=lambda x: -x[1]["errors"]):
+            lines.append(
+                f"  {tool_name}: {stats['calls']} calls, "
+                f"{stats['errors']} errors, "
+                f"{stats['avg_latency_ms']:.0f}ms avg latency"
+            )
+
+    if health.alerts:
+        lines.append(f"\nAlerts ({len(health.alerts)}):")
+        for a in health.alerts:
+            sev = "CRIT" if a.severity == "critical" else "WARN"
+            lines.append(f"  [{sev}] [{a.alert_type}] {a.detail}")
+    else:
+        lines.append("\nNo alerts — tool log is healthy.")
+
+    return "\n".join(lines)
 
 
 # ─── observe ──────────────────────────────────────────────────────────
@@ -3879,6 +4125,91 @@ def cmd_news_analyze(date_str: str | None = None, phases_str: str = "1"):
     db.close()
 
 
+def cmd_check_tool_log():
+    """Continuous tool log health monitoring.
+
+    One-shot mode (default):
+        python harness_daemon.py check-tool-log
+
+    Continuous watch mode:
+        python harness_daemon.py check-tool-log --watch --interval 60 --window 5
+    """
+    import argparse as _argparse
+    import sys as _sys
+
+    # Parse sub-args from remaining after main parser
+    # cmd_check_tool_log receives control directly, so we re-parse sys.argv
+    sub = _argparse.ArgumentParser(description="Tool log health monitor")
+    sub.add_argument("--watch", action="store_true", default=False,
+                     help="Continuous monitoring loop")
+    sub.add_argument("--interval", type=int, default=60,
+                     help="Seconds between checks in watch mode (default: 60)")
+    sub.add_argument("--window", type=int, default=5,
+                     help="Minutes per check window (default: 5)")
+    sub.add_argument("--once", action="store_true", default=False,
+                     help="Run once and exit (default if --watch not set)")
+
+    # Only parse args after "check-tool-log"
+    try:
+        argv = _sys.argv[_sys.argv.index("check-tool-log") + 1:]
+    except ValueError:
+        argv = []
+    sub_args = sub.parse_args(argv)
+
+    config_path = HARNESS_DIR / "harness_config.yaml"
+    config = load_config(config_path)
+    db_path = Path(config["harness"]["db_path"])
+
+    if not db_path.exists():
+        print(f"[harness] DB not found: {db_path}", file=_sys.stderr)
+        return
+
+    if sub_args.watch:
+        _run_continuous_watch(db_path, sub_args.window, sub_args.interval)
+    else:
+        health = check_tool_log(db_path, window_minutes=sub_args.window)
+        print(_format_tool_log_report(health))
+
+
+def _run_continuous_watch(db_path: Path, window_minutes: int, interval_seconds: int):
+    """Continuous monitoring loop for tool log health."""
+    import sys as _sys
+
+    print(f"[harness] Starting continuous tool log watch "
+          f"(window={window_minutes}min, interval={interval_seconds}s)")
+    print(f"[harness] DB: {db_path}")
+    print("[harness] Press Ctrl+C to stop.\n")
+
+    last_checkpoint: float | None = None
+    last_status: str = "healthy"
+
+    try:
+        while True:
+            health = check_tool_log(
+                db_path,
+                window_minutes=window_minutes,
+                last_checkpoint=last_checkpoint,
+            )
+
+            # Update checkpoint to now (next cycle only sees new entries)
+            last_checkpoint = health.checked_at
+
+            # Print report only on status change or if there are alerts
+            if health.overall_status != last_status or health.alerts:
+                print(_format_tool_log_report(health))
+                print()
+                last_status = health.overall_status
+            else:
+                # Heartbeat — show we're still alive
+                ts = time.strftime("%H:%M:%S", time.localtime(health.checked_at))
+                print(f"[{ts}] {health.total_calls} calls, "
+                      f"{health.error_count} errors ({health.error_rate:.1%}) — {health.overall_status}")
+
+            time.sleep(interval_seconds)
+    except KeyboardInterrupt:
+        print("\n[harness] Watch stopped.")
+
+
 def cmd_feature_lib(remaining: list[str]):
     """Feature library management subcommands.
 
@@ -3978,7 +4309,8 @@ def main():
     parser.add_argument(
         "command",
         choices=["observe", "inject", "review", "analyze", "diagnose",
-                 "cleanup", "status", "news-analyze", "feature-lib", "guardian"],
+                 "cleanup", "status", "news-analyze", "check-tool-log",
+                 "feature-lib", "guardian"],
         nargs="?",
         default=None,
     )
@@ -4016,6 +4348,8 @@ def main():
             cmd_news_analyze(args.date, args.phases)
         elif args.command == "feature-lib":
             cmd_feature_lib(remaining)
+        elif args.command == "check-tool-log":
+            cmd_check_tool_log()
         elif args.command == "guardian":
             # Delegate to independent guardian subprocess
             from harness_guardian import run_pulse, run_status, run_daemon

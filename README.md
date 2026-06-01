@@ -1,6 +1,41 @@
 
 # 人类是立法者，Aegis 是你自己定义的规则之盾
 
+[![PyPI](https://img.shields.io/badge/pypi-aegis--harness-blue)](https://pypi.org/project/aegis-harness/)
+[![Python](https://img.shields.io/badge/python-3.11+-blue)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+## 快速安装
+
+```bash
+# 从 PyPI 安装
+pip install aegis-harness
+
+# 或从 GitHub 安装
+pip install git+https://github.com/jennielvfei-coder/AegisHarness.git
+
+# 验证安装
+harness status
+```
+
+## 使用
+
+```bash
+harness observe          # 分析最近一次 session，生成观察报告
+harness inject           # 注入上下文到下一次 session（含健康检查）
+harness review           # 查看待审查的技能队列
+harness status           # 系统状态总览
+harness analyze --days 7 # 跨 session 趋势分析
+harness diagnose --days 7 # 诊断问题
+harness check-tool-log   # 一次性工具日志健康检查
+harness check-tool-log --watch  # 持续监控工具日志（Ctrl+C 停止）
+harness check-tool-log --watch --interval 30 --window 3  # 30s 间隔，3min 窗口
+```
+
+> **配置**: 首次运行前，编辑 `harness/harness_config.yaml` 设置 `db_path` 和 `transcript_dir` 路径。
+
+---
+
 这不是一个让 Claude 更聪明的系统。
 这是一个让 Claude 可预测、可审计、可纠错的**更可信**系统。
 

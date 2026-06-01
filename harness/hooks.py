@@ -6,6 +6,7 @@ All heavy work is deferred to observer (Stop hook, post-session).
 """
 
 import json
+import re
 import sqlite3
 import sys
 import time
@@ -17,6 +18,53 @@ TOOL_LOG_TABLE = "tool_call_log"
 SIGNAL_BUFFER_TABLE = "signal_buffer"
 CONSTRAINT_CACHE_PATH = HARNESS_DIR / ".constraint_cache.json"
 EXECUTION_FLAG_PATH = HARNESS_DIR / ".execution_flag.json"
+
+
+def _stdin_has_data() -> bool:
+    """Windows: check if stdin pipe has data available without consuming it.
+
+    Uses PeekNamedPipe to inspect the pipe buffer. Returns True if at
+    least one byte is ready to read. Safe to call on any stdin handle;
+    returns False on any error (console stdin, invalid handle, etc.).
+    """
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+        handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+        avail = wintypes.DWORD()
+        if ctypes.windll.kernel32.PeekNamedPipe(
+            handle, None, 0, None, ctypes.byref(avail), None,
+        ):
+            return avail.value > 0
+    except Exception:
+        pass
+    return False
+
+
+def _read_stdin_hook_data() -> dict | None:
+    """Read hook data from stdin JSON (modern Claude Code hook protocol).
+
+    Claude Code pipes hook event data as a single-line JSON object to
+    the hook process stdin. This bypasses shell variable expansion issues
+    on Windows entirely (GitHub anthropics/claude-code#16564).
+
+    Returns None if stdin is a TTY, has no data, or parsing fails.
+    """
+    try:
+        if sys.stdin.isatty():
+            return None
+        if not _stdin_has_data():
+            return None
+        raw = sys.stdin.buffer.read(16384)
+        if not raw:
+            return None
+        data = json.loads(raw)
+        if isinstance(data, dict) and data:
+            return data
+    except Exception:
+        pass
+    return None
 
 
 def _log_err(source: str, exc: Exception, ctx: dict | None = None):
@@ -130,6 +178,26 @@ _PS_CMDLETS = (
     r"Group-Object|Compare-Object)\b"
 )
 
+# PowerShell operators and syntax constructs that MUST use the PowerShell tool.
+# These are patterns that bash will misinterpret: () as subshell, {} as
+# brace expansion / code blocks, $var.Property as variable+string, etc.
+_PS_OPERATORS_SYNTAX = (
+    r"\$\w+\.\w+"                                    # $var.Property access
+    r"|-\b(eq|ne|gt|lt|ge|le|match|like|notmatch|"
+    r"notlike|contains|notcontains|in|notin|replace|"
+    r"split|join|creplace|clike|cnotlike|cnotmatch|"
+    r"cmatch|cgt|cge|clt|cle|ieq|ine|igt|ige|ilt|ile)\b"
+    r"|\bif\s*\(\s*"                                 # if ( ... ) — bash subshell
+    r"|\belse\s*\{"                                  # else { — bash brace group
+    r"|\belseif\s*\("                                # elseif ( — PS keyword
+    r"|\bforeach\s*\("                               # foreach ( — PS keyword
+    r"|-\b(ErrorAction|WarningAction|ErrorVariable|"
+    r"OutVariable|OutBuffer|PipelineVariable|"
+    r"InformationAction|InformationVariable)\b"       # PS common parameters
+    r"|\$\w+:"                                       # $env:VAR pseudo-scope
+    r"|\$_\."                                        # $_ pipeline variable
+)
+
 
 def pre_tool_use(tool_name: str, tool_input: str):
     """PreToolUse hook — PS cmdlet detection + constraint block + execution-pause check.
@@ -144,7 +212,24 @@ def pre_tool_use(tool_name: str, tool_input: str):
     """
     # ── PS cmdlet in Bash tool detection ──
     if tool_name == "Bash":
-        import re
+        # Backtick command-substitution detection: backticks in bash are
+        # interpreted as $(...) — command substitution. When the harness
+        # injects markdown with `code` spans and Claude copies those into
+        # a Bash command, bash tries to execute the backtick content.
+        # This detects backtick pairs in Bash tool calls BEFORE execution.
+        backtick_matches = re.findall(r'`([^`]+)`', tool_input)
+        if backtick_matches:
+            unique_backticks = list(set(backtick_matches))[:5]
+            print(
+                f"\n⚠️  Bash 命令包含反引号 (`...`) —— 这会被 bash 解释为命令替换！\n"
+                f"   请用单引号或 $(...) 替代，或去掉反引号。\n"
+                f"   检测到的反引号内容: {', '.join(unique_backticks)}\n"
+            )
+            print(
+                f"[harness] ⚠️  BACKTICK DETECTED in Bash: {unique_backticks}",
+                file=sys.stderr, flush=True,
+            )
+
         if re.search(_PS_CMDLETS, tool_input, re.IGNORECASE):
             matched_cmdlets = re.findall(_PS_CMDLETS, tool_input, re.IGNORECASE)
             unique = list(set(matched_cmdlets))[:5]
@@ -154,6 +239,31 @@ def pre_tool_use(tool_name: str, tool_input: str):
             )
             print(
                 f"[harness] ⛔ BLOCKED: Bash called with PS cmdlet(s) {unique}",
+                file=sys.stderr,
+            )
+
+        if re.search(_PS_OPERATORS_SYNTAX, tool_input, re.IGNORECASE):
+            print(
+                f"\n🛑 Bash 命令包含 PowerShell 语法（控制流/运算符/变量）：\n"
+                f"   if (...), else {...}, $var.Property, -eq/-match/-like 等\n"
+                f"   请改用 PowerShell 工具。Bash 工具只支持 POSIX/bash 语法。\n"
+            )
+            print(
+                f"[harness] ⛔ BLOCKED: Bash called with PS operators/syntax",
+                file=sys.stderr,
+            )
+
+        # Leading-brace detection: commands starting with { are almost
+        # always JSON/JS objects pasted into Bash. Bash interprets { as
+        # a command-group start and tries to execute keys as commands.
+        if re.match(r'\s*\{', tool_input):
+            print(
+                f"\n🛑 Bash 命令以 '{{' 开头 —— 这可能是 JSON/JS 对象误粘贴到 Bash。\n"
+                f"   Bash 会把 {{ 当作代码块开始，并尝试把 key 当成命令执行。\n"
+                f"   如果是数据，请用 echo '{{...}}' 或改用 PowerShell。\n"
+            )
+            print(
+                f"[harness] ⛔ BLOCKED: Bash command starts with '{{' (probable JSON-as-command)",
                 file=sys.stderr,
             )
 
@@ -204,6 +314,7 @@ def post_tool_use(tool_name: str, tool_input: str, tool_output: str = ""):
     increment the violation counter. After max_violations, the constraint
     escalates to session-fatal in the next PreToolUse.
     """
+    t_start = time.time()
     _ensure_tables()
 
     status = "success"
@@ -223,11 +334,14 @@ def post_tool_use(tool_name: str, tool_input: str, tool_output: str = ""):
         elif any(e in output_lower for e in ("rate limit", "too many", "429")):
             error_type = "rate_limit"
 
+    duration = int((time.time() - t_start) * 1000)
+
     try:
         conn = sqlite3.connect(str(DB_PATH), timeout=2)
         conn.execute(
-            f"INSERT INTO {TOOL_LOG_TABLE}(tool_name, status, error_type) VALUES(?,?,?)",
-            (tool_name, status, error_type),
+            f"INSERT INTO {TOOL_LOG_TABLE}(tool_name, status, error_type, duration_ms)"
+            f" VALUES(?,?,?,?)",
+            (tool_name, status, error_type, duration),
         )
 
         # Constraint violation tracking
@@ -348,7 +462,6 @@ def _propagate_within_session_constraint(tool_name: str, tool_input: str, tool_o
 
         # Extract match pattern from tool input
         if tool_name == "WebFetch":
-            import re
             m = re.search(r'https?://[^\s"\')]+', tool_input)
             match_pattern = m.group(0)[:80] if m else tool_input[:80]
         elif tool_name == "WebSearch":
@@ -543,25 +656,51 @@ def main():
     action = sys.argv[1]
     raw = sys.argv[2:]
 
+    # Try stdin JSON first (modern Claude Code hook protocol).
+    # Falls back to argv parsing when stdin is not available
+    # (manual testing, older Claude Code, or TTY stdin).
+    stdin_data = _read_stdin_hook_data()
+
     try:
         if action == "pre-tool":
-            parsed = _parse_args(raw)
-            tool = parsed.get("tool_name", raw[0] if len(raw) > 0 else "")
-            inp = parsed.get("tool_input", raw[1] if len(raw) > 1 else "")
+            if stdin_data:
+                tool = stdin_data.get("tool_name", "")
+                inp = stdin_data.get("tool_input", "")
+            else:
+                parsed = _parse_args(raw)
+                tool = parsed.get("tool_name", raw[0] if len(raw) > 0 else "")
+                inp = parsed.get("tool_input", raw[1] if len(raw) > 1 else "")
+            # Fallback: when both stdin and argv are empty, log blindness
+            if not tool:
+                tool = "unknown"
             pre_tool_use(tool, inp)
         elif action == "post-tool":
-            parsed = _parse_args(raw)
-            tool = parsed.get("tool_name", raw[0] if len(raw) > 0 else "")
-            inp = parsed.get("tool_input", raw[1] if len(raw) > 1 else "")
-            out = parsed.get("tool_output", raw[2] if len(raw) > 2 else "")
+            if stdin_data:
+                tool = stdin_data.get("tool_name", "")
+                inp = stdin_data.get("tool_input", "")
+                out = stdin_data.get("tool_output", stdin_data.get("output", ""))
+            else:
+                parsed = _parse_args(raw)
+                tool = parsed.get("tool_name", raw[0] if len(raw) > 0 else "")
+                inp = parsed.get("tool_input", raw[1] if len(raw) > 1 else "")
+                out = parsed.get("tool_output", raw[2] if len(raw) > 2 else "")
+            # Fallback: when both stdin and argv are empty, log blindness
+            if not tool:
+                tool = "unknown"
             post_tool_use(tool, inp, out)
         elif action == "user-msg":
-            parsed = _parse_args(raw)
-            msg = parsed.get("message", " ".join(raw) if raw else "")
+            if stdin_data:
+                msg = stdin_data.get("message", "")
+            else:
+                parsed = _parse_args(raw)
+                msg = parsed.get("message", " ".join(raw) if raw else "")
             user_prompt_submit(msg)
         elif action == "news-detect":
-            parsed = _parse_args(raw)
-            msg = parsed.get("message", " ".join(raw) if raw else "")
+            if stdin_data:
+                msg = stdin_data.get("message", "")
+            else:
+                parsed = _parse_args(raw)
+                msg = parsed.get("message", " ".join(raw) if raw else "")
             news_detect(msg)
     except Exception as e:
         _log_err("hooks.main", e, {"action": action})

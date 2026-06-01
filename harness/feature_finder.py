@@ -849,7 +849,7 @@ def store_feature_activations(
 def main():
     import sys
     from indexer import HarnessDB
-    from news_agent.vectorize import parse_news_file
+    from duonews.vectorize import parse_news_file
     from pathlib import Path
 
     db = HarnessDB()

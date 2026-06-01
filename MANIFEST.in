@@ -1,0 +1,5 @@
+# Non-Python data files distributed with the package
+include harness/harness_config.yaml
+recursive-include harness/skills *.md
+include harness/*.json
+include harness/*.yaml

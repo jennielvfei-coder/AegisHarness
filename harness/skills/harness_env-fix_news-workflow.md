@@ -1,50 +1,50 @@
 ```
 ```markdown
 ---
-name: harness-active-guard-layer
-description: Automatically validate harness configuration at session start and apply fixes via env-fix skills
-tags: [harness, env-fix, preflight, auto-check]
+name: harness-post-change-health-check
+description: Systematic diagnostic checklist to validate harness integrity after any configuration or code modification.
+tags: [harness, diagnostics, configuration-validation, mcp, hooks, prethink:exploration]
 triggers:
-  - At the start of a new session (before user's first task)
-  - When harness configuration files (settings, hooks, memory) may be stale
-  - When a previous session recorded a harness-related failure
+  - After modifying settings.local.json, settings.json, hooks, MCP wrappers, or any harness infrastructure
+  - When a previous session ended with configuration fixes
+  - Before starting a task that depends on harness features (MCP servers, web fetch, observers)
+  - User mentions "harness broke", "check config", "are hooks working", or similar concerns
 version: 1
-harness_confidence: 0.9
+harness_confidence: 0.85
 ---
 
-# Harness Active Guard Layer
+# Harness Post-Change Health Check
 
 ## 执行逻辑
 ### When to Use
-The harness should actively guard session integrity, not merely store past failures.  
-Use this skill at session start to automatically verify and repair the harness configuration (settings, hooks, memory-derived preflight checks) before the user begins work.
+Run this checklist whenever the project's harness (Claude Code extensions, MCP servers, hooks, observers, settings layers) has been modified. This prevents silent breakage from cascading config errors and ensures guard layers are active before the next task.
 
 ### Step-by-Step
-1. **Load current configuration**  
-   Read `settings.local.json`, `settings.json`, active hooks configuration, and relevant entries from `memory/MEMORY.md`.
-2. **Compare against mandatory baseline**  
-   The baseline includes:
-   - `skipWebFetchPreflight = true` in settings
-   - All required hooks present and executable
-   - All memory items tagged `[preflight]` have been applied in the current session
-3. **Detect discrepancies**  
-   If any required entry is missing or stale, flag it.
-4. **Invoke env-fix skill**  
-   For each discrepancy, trigger the corresponding env-fix routine (e.g., write missing setting, install missing hook, re-apply memory-derived fix).
-5. **Report status**  
-   Output a concise summary: which checks passed, which were repaired, and any that require manual intervention.
+1. **Memory Audit**: Read `memory/MEMORY.md` for any recent entries about harness failures, missing settings, or broken connections. This reveals known brittle spots.
+2. **Git Diff Review**: Run `git diff` (or `git diff --stat`) to identify all modified files. Look for changes to:
+   - `.claude/settings.local.json`, `.claude/settings.json`
+   - `mcp_wrapper.py` or any MCP server configuration
+   - Hook scripts referenced in settings
+   - Project-specific packages (e.g., `duonews/`)
+3. **Settings Layering Check**: Ensure critical settings (`skipWebFetchPreflight`, hook paths, MCP server definitions) exist in the active layer (usually `settings.local.json`). Verify that `settings.json` exists if expected.
+   - If a setting is documented in memory but missing from the active file, add it.
+4. **Hook Presence**: If hooks are defined, confirm the hook scripts exist at the exact paths specified and are executable/syntactically correct.
+5. **MCP Server Connection Test**: For each MCP server defined, attempt a minimal import or connectivity check. If a wrapper (e.g., `mcp_wrapper.py`) is used, verify it doesn't block all servers.
+6. **Package Import Sanity**: For any local package touched by the diff (e.g., `duonews`), run `python -c "import <package>"` to catch broken imports.
+7. **Destructive Change Flagging**: Log any known issue entries that match the current changes, and flag them in the session notes.
 
 ### How to Verify
-After applying fixes, re-run the configuration check. All mandatory items should now be present.  
-Additionally, test a light harness operation (e.g., health-check hook) to confirm end‑to‑end validity.
+- All critical settings from memory are present in the active settings file.
+- No import errors or MCP connection failures in the quick tests.
+- Git diff shows expected changes only; no accidental overwrites.
 
 ## 异常处理
 ### Edge Cases
-- **`settings.json` missing entirely** — Create a minimal valid JSON with required fields, then merge with `settings.local.json`.
-- **Hooks reference non‑existent scripts** — Disable the broken hook, log the error, and create a memory to restore it once the script is available.
-- **User has intentionally changed/removed a required setting** — Respect local intent unless it compromises harness health; if so, warn and ask for confirmation before overwriting.
+- **settings.json missing but settings.local.json present**: Determine if defaults are intentionally omitted; if hooks/MCPs rely on merged layers, create a minimal `settings.json`.
+- **MCP wrapper bypass active**: If `mcp_wrapper.py` is known to break connections, verify alternative paths are enabled (e.g., direct MCP calls).
+- **Multiple sessions modifying same files**: Run the checklist after each session's changes; cross-session drift is a known failure mode.
 
 ### Fallback
-If automatic repair fails (e.g., insufficient permissions, corrupted file), report the exact problem to the user with clear manual resolution steps.  
-Store a memory (`memory/MEMORY.md`) of the failure so that the guard layer re‑attempts the fix next session and does not silently degrade.
+- If a setting is missing but uncertain of correct value, consult `memory/MEMORY.md` entries for past fixes.
+- If MCP servers still fail after known fixes, fall back to direct HTTP requests or user-provided data; document the failure in memory.
 ```

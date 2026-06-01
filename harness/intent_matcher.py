@@ -2,7 +2,7 @@
 
 Design:
 - Zero LLM dependency. Sub-millisecond scoring.
-- Keywords and domain tags are sourced from news_agent.config (single source of truth).
+- Keywords and domain tags are sourced from duonews.config (single source of truth).
 - Score = sum(matched keyword weights). Trigger if >= min_score.
 - inject_workflow_context() now returns a lightweight pointer to the skill file
   instead of hardcoded workflow instructions.
@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-# ── Intent pattern registry — sourced from news_agent.config ────────────
+# ── Intent pattern registry — sourced from duonews.config ────────────
 
 def _load_intents():
     """Lazy-load intents from shared config so import never fails at module level."""
@@ -222,7 +222,7 @@ def inject_workflow_context(intent_result: dict, source_health: dict | None = No
     """Generate the context injection string for a matched intent.
 
     Returns a compact (5-8 line) block that points to the skill file
-    and the unified news_agent package — no hardcoded workflow steps.
+    and the unified duonews package — no hardcoded workflow steps.
     """
     if not intent_result:
         return ""

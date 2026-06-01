@@ -246,7 +246,7 @@ def _extract_entities(text: str) -> list[str]:
     """Extract canonical entity names from text. Lightweight version —
     uses the same ENTITY_DICT as news_vectorizer."""
     try:
-        from news_agent.vectorize import _extract_entities as _ee
+        from duonews.vectorize import _extract_entities as _ee
         return _ee(text)
     except ImportError:
         return []

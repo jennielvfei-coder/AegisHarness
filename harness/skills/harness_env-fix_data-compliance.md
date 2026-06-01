@@ -1,50 +1,47 @@
-```
 ```markdown
 ---
-name: harness-config-audit
-description: Systematic audit of Claude Code harness configuration (hooks, settings, MCP servers) after changes or as a pre-session health check
-tags: [harness, configuration-audit, hooks, mcp, data-compliance, prethink:systematic]
+name: diagnose-missing-python-package
+description: Troubleshoot skills that fail due to missing or broken Python package dependencies.
+tags: [data-compliance, ai-governance, news-workflow, prethink:exploration]
 triggers:
-  - User asks to "audit harness" or "check harness config"
-  - After modifying `.claude/` files, `settings.json` or MCP wrappers
-  - When hooks or MCP servers stop responding
+  - "skill execution fails with ModuleNotFoundError or cannot import package"
 version: 1
 harness_confidence: 0.85
 ---
 
-# Harness Configuration Audit
+# 诊断缺失的 Python 包依赖
 
 ## 执行逻辑
 ### When to Use
-- 已经更改了 `.claude/` 目录下的任何文件（settings, hooks, MCP wrappers）
-- 怀疑 Harness 的 hook 或 MCP server 调用失败
-- 作为 SessionStart 的主动式检查（回忆 `Harness Active Guard Layer` 记忆）
+- 技能尝试导入一个 Python 包时抛出 `ModuleNotFoundError`。
+- `pip show <package>` 显示未安装或导入失败。
+- 需要快速验证环境、定位本地备份或判定安装方式。
 
 ### Step-by-Step
-1. **回忆已知问题**：读取项目 `memory/MEMORY.md`，列出所有与 harness 配置相关的条目（如 `skipWebFetchPreflight` 缺失、`mcp_wrapper.py` 故障），把这些问题作为强制检查项。
-2. **审计近期变更**：执行 `git diff --stat` 和 `git diff`，检查是否有影响 `settings.json`、`settings.local.json`、hooks 文件或 MCP 脚本的改动。任何相关的 diff 都要仔细验证。
-3. **检查 settings 文件**：
-   - 确认项目根目录存在 `.claude/settings.json` 和/或 `.claude/settings.local.json`。
-   - 读取这些文件，验证关键字段：
-     - `hooks`：是否包含 `SessionStart`、`UserPromptSubmit` 等必要事件；hook 脚本路径是否有效。
-     - `mcpServers`：MCP 服务器的名称和配置是否完整，`command` 和 `args` 指向可执行脚本（注意 Windows 路径与 Python 环境）。
-     - 历史补丁字段：例如 `skipWebFetchPreflight` 必须在 `settings.local.json` 中显式设置（否则会触发之前的失败）。
-4. **验证 MCP 连通性**：
-   - 逐个尝试 import 或调用轻量级 MCP tool（如 `world-news-api`），确认不再有 "Failed to connect" 错误。
-   - 如果 MCP wrapper 存在，检查 wrapper 脚本是否有语法错误或依赖缺失。
-5. **汇总报告**：列出缺失的 hooks、未设置的关键字段、连不上的 MCP 服务器，以及对应修复建议（直接修改 JSON 或更新脚本）。
+1. **验证可导入性**：执行 `python -c "import <package>"`，若成功则包存在，问题可能在子模块。
+2. **寻找本地源代码**：根据技能目录查找同名文件夹（如 `duonews/`），使用 `Glob` 或 `Get-ChildItem`。
+3. **检查 pip 安装**：运行 `pip show <package>` 或 `python -m pip show <package>`，确认是否为正式安装包。
+4. **尝试作为模块运行**：若本地文件夹存在，执行 `python -m <package> --help`，捕获启动错误。
+5. **查阅 git 历史**：`git log --oneline -5 -- <directory>/` 了解近期改动，判断是否应可导入。
+6. **检查 `__pycache__`**：若存在，说明此前曾成功导入，环境可能已改变。
+7. **验证关联依赖**：若技能用到 `state.db` 或 CLI 脚本，并行检查其存在性（如 `Test-Path`）。
+8. **决策与修复**：
+   - 正式包可安装：`pip install <package>`
+   - 仅本地源码：调整 `sys.path` 或在技能目录内启动 Python
+   - 无法修复：明确报告用户缺失，提示手工安装或建议禁用技能
 
 ### How to Verify
-- 修复后，重新执行审计流程（重新读取 memory、git diff、settings文件、MCP 测试），确保所有项通过。
-- 关闭并重新打开会话，观察 SessionStart 日志是否正常触发，无 MCP 错误。
+- 修复后重新执行 `python -c "import <package>"` 成功。
+- 技能启动检查（如 `duonews` 的导入测试）不再失败。
 
 ## 异常处理
 ### Edge Cases
-- **没有 MEMORY.md**：跳过已知问题回忆，但仍执行步骤 2-4。
-- **无 git 仓库**：跳过 `git diff`，改用手动列出 `.claude/` 目录的文件时间戳来推断近期更改。
-- **settings 文件分全局/项目两层**：检查全局 `~/.claude/settings.json` 和项目内的 `.claude/settings.json`（或 `.claude/settings.local.json`），合并分析；注意 local 覆盖 global。
-- **Windows/Linux 路径差异**：验证 hook/MCP 命令路径时，确保使用正确的分隔符和可执行扩展名。
+- **包名与技能名不一致**（例如技能名为 `anysearch`，实际文件是 `anysearch_cli.py`）：需阅读技能描述定位入口。
+- **虚拟环境混乱**：Python 解释器可能指向错误环境，必要时使用绝对路径调用 `python`。
+- **已安装但导入失败**：运行 `pip check` 排查依赖冲突。
+- **本地源码缺少 `setup.py`**：需从父目录 `python -m` 启动，或添加路径。
 
 ### Fallback
-- 如果无法通过自动测试确认 hooks/MCP 正常工作（例如缺少测试工具），标记为手工检查项，并将观察结果追加到 `MEMORY.md` 中，以便下次自动审计时再次验证。
+- 若无法恢复包，告知用户技能依赖缺失，提供手动安装指令。
+- 使用后备方法（如手动搜索）完成用户的原始任务，避免流程中断。
 ```
